@@ -11,3 +11,4 @@ tools/harness/build/
 *.log
 __pycache__/
 .claude/
+dof_first_test.png
