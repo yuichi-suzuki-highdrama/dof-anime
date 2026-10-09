@@ -44,6 +44,9 @@ enum {
 	DOF_SUBJECT_LAYER,        /* キャラのマスク (ロトブラシなど)。この中はくっきり残す */
 	DOF_SUBJECT_CHANNEL,      /* 1: Alpha  2: Luminance */
 	DOF_SUBJECT_AMOUNT,
+	DOF_AUTO_SUBJECT,         /* 深度を作ったあと、キャラのマスクも自動で作る */
+	DOF_SUBJECT_TYPE,         /* 1: Anime Character  2: Person  3: Animal */
+	DOF_SUBJECT_GENERATE,     /* ボタン: 今の Focus Point でマスクを作り直す */
 	DOF_TOPIC_FOCUS_END,
 
 	/* --- Blur --- */
@@ -99,6 +102,9 @@ enum {
 	ID_SUBJECT_LAYER,
 	ID_SUBJECT_CHANNEL,
 	ID_SUBJECT_AMOUNT,
+	ID_AUTO_SUBJECT,
+	ID_SUBJECT_TYPE,
+	ID_SUBJECT_GENERATE,
 
 	ID_TOPIC_BLUR = 50,
 	ID_BLUR_SIZE,

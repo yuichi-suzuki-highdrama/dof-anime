@@ -359,6 +359,16 @@ static PF_Err ParamsSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef 
 	PF_ADD_FLOAT_SLIDERX("Keep Subject Sharp", 0.f, 100.f, 0.f, 100.f, 100.f,
 		PF_Precision_INTEGER, PF_ValueDisplayFlag_PERCENT, 0, ID_SUBJECT_AMOUNT);
 
+	/* キャラのマスクを自動で作る (SAM 3.1)。深度ができたら、今の時刻の Focus Point にいるキャラを動画全体で追いかける。
+	   別のキャラにピントを移したら Generate Subject で作り直す */
+	AEFX_CLR_STRUCT(def);
+	PF_ADD_CHECKBOXX("Auto Subject", TRUE, 0, ID_AUTO_SUBJECT);
+
+	AEFX_CLR_STRUCT(def);
+	PF_ADD_POPUP("Subject Type", 3, 1, "Anime Character|Person|Animal", ID_SUBJECT_TYPE);
+
+	PF_ADD_BUTTON("Subject Mask", "Generate Subject", 0, PF_ParamFlag_SUPERVISE, ID_SUBJECT_GENERATE);
+
 	AEFX_CLR_STRUCT(def);
 	PF_END_TOPIC(ID_TOPIC_FOCUS_END);
 
@@ -1055,6 +1065,8 @@ PF_Err EffectMain(
 			if (!uc) break;
 			if (uc->param_index == DOF_AUTO_GENERATE) {
 				Auto_Request(in_data, true, (int)params[DOF_AUTO_ENGINE]->u.pd.value);
+			} else if (uc->param_index == DOF_SUBJECT_GENERATE) {
+				Auto_RequestSubject(in_data, true);
 			} else if (uc->param_index == DOF_AUTO_CLEAN) {
 				Auto_CleanCache(in_data);
 			} else if (uc->param_index == DOF_FOCUS_MODE) {

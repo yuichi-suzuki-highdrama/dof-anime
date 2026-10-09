@@ -59,6 +59,10 @@ struct AutoConfig {
 	/* remote (Depth Engine = Remote): 別の PC の深度サーバー (tools/depth_server)。gen_passes.py --remote で動画を送って深度を受け取る */
 	/* 送り先は設定ファイル (%APPDATA%\SRLM\RelightAnime.ini、DoFAnime.ini) の remote_server。空ならこの PC で作る */
 	std::wstring remoteServer;
+	/* キャラのマスク (Subject Layer) の自動生成: SAM 3.1 を ComfyUI の Python で動かす (tools/subject_mask.py) */
+	std::wstring subjectPython = L"C:\\ComfyUI_windows_portable\\python_embeded\\python.exe";
+	std::wstring subjectScript = L"C:\\dev\\DepthOfFieldAEPlugin\\tools\\subject_mask.py";
+	std::wstring comfyuiDir    = L"C:\\ComfyUI_windows_portable\\ComfyUI";
 	bool loaded = false;
 };
 
@@ -109,6 +113,9 @@ static void LoadIni(const std::wstring &ini)
 		else if (k == L"provider") g_cfg.provider = v;
 		else if (k == L"ort") g_cfg.ort = v;
 		else if (k == L"dll_dirs") g_cfg.dllDirs = v;
+		else if (k == L"subject_python") g_cfg.subjectPython = v;
+		else if (k == L"subject_script") g_cfg.subjectScript = v;
+		else if (k == L"comfyui_dir") g_cfg.comfyuiDir = v;
 	}
 }
 
@@ -174,6 +181,12 @@ struct AutoJob {
 	DWORD           startTick;
 	std::wstring    engine;        /* native / comfyui (設定の engine) / remote (Depth Engine = Remote) */
 	std::wstring    remoteModel;   /* remote のときの深度のモデル (Fast = vits、Quality = vitl) */
+	/* キャラのマスクのジョブ (subject = true) */
+	bool            subject = false;
+	std::wstring    subjectDir;    /* cache\<素材>\subject_<点・コマ・種類> */
+	double          pointX = 0.0, pointY = 0.0;   /* Focus Point (レイヤー座標 = 素材の画素) */
+	A_long          promptFrame = 0;               /* 点を見るコマ */
+	int             subjectType = 1;               /* 1: Anime Character  2: Person  3: Animal */
 };
 
 /* この PC で AE にフレームを描かせて relight_depth.exe で作るか */
@@ -677,9 +690,8 @@ static bool ExtractSome(AEGP_SuiteHandler &suites, AutoJob &job, DWORD budgetMs,
 /* ------------------------------------------------------------------ */
 
 static AEGP_LayerH AddPassLayer(AEGP_SuiteHandler &suites, AutoJob &job, AEGP_LayerH srcLayerH,
-                                const wchar_t *subdir, const wchar_t *ext, const wchar_t *layerName, std::wstring &err)
+                                const std::wstring &first, const wchar_t *layerName, std::wstring &err)
 {
-	std::wstring first = job.cacheDir + L"\\" + subdir + L"\\" + subdir + L".00001" + ext;
 	if (!FileExists(first)) { err = L"パスが見つかりません: " + first; return NULL; }
 
 	AEGP_FileSequenceImportOptions seq;
@@ -798,7 +810,7 @@ static bool ImportAndWire(AEGP_SuiteHandler &suites, AutoJob &job, std::wstring 
 	/* 同じ深度の連番のレイヤーがコンポにあればそれを使う。無ければ読み込んで追加する */
 	AEGP_LayerH depthL = job.force ? NULL : FindLayerWithSource(suites, job.compH, job.cacheDir + L"\\depth\\depth.00001" + ext);
 	if (depthL) AutoLog(L"import: reuse the depth layer already in the comp");
-	else depthL = AddPassLayer(suites, job, srcLayerH, L"depth", ext, L"DoF depth", err);
+	else depthL = AddPassLayer(suites, job, srcLayerH, job.cacheDir + L"\\depth\\depth.00001" + ext, L"DoF depth", err);
 	bool ok = (depthL != NULL);
 	AEGP_LayerIDVal depthId = 0;
 	if (ok) {
@@ -830,6 +842,253 @@ static bool ImportAndWire(AEGP_SuiteHandler &suites, AutoJob &job, std::wstring 
 }
 
 /* ------------------------------------------------------------------ */
+/* キャラのマスク (Subject Layer) の自動生成                               */
+/* ------------------------------------------------------------------ */
+
+/* Subject Type の選択肢 → SAM 3.1 に渡す文字 */
+static const wchar_t *SubjectText(int type)
+{
+	switch (type) {
+	case 2: return L"person";
+	case 3: return L"animal";
+	default: return L"anime character";
+	}
+}
+
+/* キャラのマスクを作る必要がある本エフェクトを集める (Auto Subject がオンで Subject Layer が未設定、または作り直し) */
+static void CollectSubjectEffects(AEGP_SuiteHandler &suites, AEGP_LayerH layerH, bool force, std::vector<AEGP_EffectRefH> &out)
+{
+	A_long n = 0;
+	if (suites.EffectSuite4()->AEGP_GetLayerNumEffects(layerH, &n) != A_Err_NONE) return;
+	for (A_long i = 0; i < n; ++i) {
+		AEGP_EffectRefH eH = NULL;
+		if (suites.EffectSuite4()->AEGP_GetLayerEffectByIndex(g_pluginId, layerH, i, &eH) != A_Err_NONE || !eH) continue;
+		bool keep = false;
+		if (EffectIsOurs(suites, eH) && GetStreamLayerId(suites, eH, L"Depth Layer") != 0) {
+			const bool autoOn = GetStreamOneD(suites, eH, L"Auto Subject", 1.0) >= 0.5;
+			const AEGP_LayerIDVal sid = GetStreamLayerId(suites, eH, L"Subject Layer");
+			const bool missing = autoOn && sid != 0 && DepthSourceMissing(suites, layerH, sid);
+			keep = force || (autoOn && (sid == 0 || missing));
+		}
+		if (keep) out.push_back(eH);
+		else suites.EffectSuite4()->AEGP_DisposeEffect(eH);
+	}
+}
+
+/* 2D ポイントのストリームの値 (レイヤー座標) を、レイヤーの時刻 t で読む */
+static bool GetStreamPoint(AEGP_SuiteHandler &suites, AEGP_EffectRefH effectH, const wchar_t *name, const A_Time &t, double &x, double &y)
+{
+	AEGP_StreamRefH sH = FindStream(suites, effectH, name);
+	if (!sH) return false;
+	bool ok = false;
+	AEGP_StreamValue2 val;
+	AEFX_CLR_STRUCT(val);
+	if (suites.StreamSuite6()->AEGP_GetNewStreamValue(g_pluginId, sH, AEGP_LTimeMode_LayerTime, &t, FALSE, &val) == A_Err_NONE) {
+		x = val.val.two_d.x;
+		y = val.val.two_d.y;
+		ok = true;
+		suites.StreamSuite6()->AEGP_DisposeStreamValue(&val);
+	}
+	suites.StreamSuite6()->AEGP_DisposeStream(sH);
+	return ok;
+}
+
+/* 子プロセスを起動し、標準出力をログへ書く (失敗したら NULL) */
+static HANDLE SpawnCommand(const std::wstring &cmd, const std::wstring &logPath, std::wstring &errOut)
+{
+	AutoLog(L"spawn: " + cmd);
+	SECURITY_ATTRIBUTES sa = {sizeof(sa), NULL, TRUE};
+	HANDLE hLog = CreateFileW(logPath.c_str(), GENERIC_WRITE, FILE_SHARE_READ, &sa, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+	STARTUPINFOW si;
+	ZeroMemory(&si, sizeof(si));
+	si.cb = sizeof(si);
+	if (hLog != INVALID_HANDLE_VALUE) {
+		si.dwFlags = STARTF_USESTDHANDLES;
+		si.hStdOutput = hLog;
+		si.hStdError = hLog;
+		si.hStdInput = NULL;
+	}
+	PROCESS_INFORMATION pi;
+	ZeroMemory(&pi, sizeof(pi));
+	std::vector<wchar_t> cmdBuf(cmd.begin(), cmd.end());
+	cmdBuf.push_back(0);
+	SetEnvironmentVariableW(L"PYTHONIOENCODING", L"utf-8");
+	BOOL ok = CreateProcessW(NULL, cmdBuf.data(), NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
+	if (hLog != INVALID_HANDLE_VALUE) CloseHandle(hLog);
+	if (!ok) {
+		wchar_t buf[256];
+		swprintf(buf, 256, L"起動できませんでした (Win32 error %lu)\n", GetLastError());
+		errOut = buf + cmd;
+		return NULL;
+	}
+	CloseHandle(pi.hThread);
+	SetPriorityClass(pi.hProcess, BELOW_NORMAL_PRIORITY_CLASS);
+	return pi.hProcess;
+}
+
+/* キャラのマスクのジョブを作る (深度のジョブから、または「Generate Subject」から) */
+static AutoJob MakeSubjectJob(AEGP_CompH compH, AEGP_LayerIDVal layerId, bool force)
+{
+	AutoJob job;
+	job.compH = compH;
+	job.layerId = layerId;
+	job.force = force;
+	job.state = JOB_QUEUED;
+	job.proc = NULL;
+	job.frames = 0;
+	job.isStill = false;
+	job.itemH = NULL;
+	job.fps = 24.0;
+	job.nextFrame = 0;
+	job.downsample = 1;
+	job.framesFile = NULL;
+	job.startTick = 0;
+	job.subject = true;
+	job.promptFrame = 0;
+	job.pointX = job.pointY = 0.0;
+	job.subjectType = 1;
+	return job;
+}
+
+/* 読み込んで Subject Layer に結線する */
+static bool ImportSubject(AEGP_SuiteHandler &suites, AutoJob &job, std::wstring &err)
+{
+	AEGP_LayerH srcLayerH = NULL;
+	if (suites.LayerSuite9()->AEGP_GetLayerFromLayerID(job.compH, job.layerId, &srcLayerH) != A_Err_NONE || !srcLayerH) {
+		err = L"対象レイヤーが見つかりません (削除された可能性)";
+		return false;
+	}
+	std::vector<AEGP_EffectRefH> effects;
+	CollectSubjectEffects(suites, srcLayerH, job.force, effects);
+	if (effects.empty()) return true;
+	std::vector<AEGP_LayerIDVal> oldIds;
+	for (AEGP_EffectRefH eH : effects) {
+		AEGP_LayerIDVal id = GetStreamLayerId(suites, eH, L"Subject Layer");
+		if (id) oldIds.push_back(id);
+	}
+	suites.UtilitySuite6()->AEGP_StartUndoGroup("DoF Anime: Auto Subject");
+	const std::wstring first = job.subjectDir + L"\\subject.00001.png";
+	AEGP_LayerH subjL = FindLayerWithSource(suites, job.compH, first);
+	if (!subjL) subjL = AddPassLayer(suites, job, srcLayerH, first, L"DoF subject", err);
+	bool ok = subjL != NULL;
+	AEGP_LayerIDVal subjId = 0;
+	if (ok) {
+		suites.LayerSuite9()->AEGP_GetLayerID(subjL, &subjId);
+		for (AEGP_EffectRefH eH : effects) {
+			SetStreamLayerId(suites, eH, L"Subject Layer", subjId);
+			SetStreamOneD(suites, eH, L"Subject Channel", 2.0);   /* 白黒の PNG なので明るさで読む */
+		}
+		for (AEGP_LayerIDVal id : oldIds) {
+			if (id == subjId) continue;
+			AEGP_LayerH oldL = NULL;
+			if (suites.LayerSuite9()->AEGP_GetLayerFromLayerID(job.compH, id, &oldL) != A_Err_NONE || !oldL) continue;
+			AEGP_MemHandle nameH = NULL;
+			std::wstring name;
+			if (suites.LayerSuite9()->AEGP_GetLayerName(g_pluginId, oldL, &nameH, NULL) == A_Err_NONE)
+				name = MemHandleToWString(suites, nameH);
+			if (name == L"DoF subject") {
+				suites.LayerSuite9()->AEGP_DeleteLayer(oldL);
+				AutoLog(L"subject: removed old layer");
+			}
+		}
+	}
+	suites.UtilitySuite6()->AEGP_EndUndoGroup();
+	for (AEGP_EffectRefH eH : effects) suites.EffectSuite4()->AEGP_DisposeEffect(eH);
+	return ok;
+}
+
+/* キャラのマスクのジョブを 1 段階進める。続けるなら keep に戻す */
+static void ProcessSubjectJob(AEGP_SuiteHandler &suites, AutoJob &job, std::vector<AutoJob> &keep)
+{
+	if (job.state == JOB_QUEUED) {
+		AEGP_LayerH layerH = NULL;
+		if (suites.LayerSuite9()->AEGP_GetLayerFromLayerID(job.compH, job.layerId, &layerH) != A_Err_NONE || !layerH) return;
+		std::vector<AEGP_EffectRefH> effects;
+		CollectSubjectEffects(suites, layerH, job.force, effects);
+		if (effects.empty()) return;   /* 作る必要なし */
+		/* 今の時刻の Focus Point と Subject Type (最初の 1 つのエフェクトのもの) */
+		AEGP_ItemH compItem = NULL;
+		A_Time compT = {0, 1}, layerT = {0, 1};
+		if (suites.CompSuite11()->AEGP_GetItemFromComp(job.compH, &compItem) == A_Err_NONE && compItem)
+			suites.ItemSuite9()->AEGP_GetItemCurrentTime(compItem, &compT);
+		suites.LayerSuite9()->AEGP_ConvertCompToLayerTime(layerH, &compT, &layerT);
+		GetStreamPoint(suites, effects[0], L"Focus Point", layerT, job.pointX, job.pointY);
+		job.subjectType = (int)(GetStreamOneD(suites, effects[0], L"Subject Type", 1.0) + 0.5);
+		for (AEGP_EffectRefH eH : effects) suites.EffectSuite4()->AEGP_DisposeEffect(eH);
+
+		job.srcPath = GetLayerSourcePath(suites, layerH, job.isStill);
+		if (job.srcPath.empty()) return;
+		AEGP_ItemH itemH = NULL;
+		if (suites.LayerSuite9()->AEGP_GetLayerSourceItem(layerH, &itemH) == A_Err_NONE && itemH) {
+			AEGP_FootageInterp interp;
+			AEFX_CLR_STRUCT(interp);
+			if (suites.FootageSuite5()->AEGP_GetFootageInterpretation(itemH, FALSE, &interp) == A_Err_NONE)
+				job.fps = interp.conform_fpsF > 0 ? interp.conform_fpsF : (interp.native_fpsF > 0 ? interp.native_fpsF : 24.0);
+		}
+		const double sec = layerT.scale ? (double)layerT.value / (double)layerT.scale : 0.0;
+		job.promptFrame = job.isStill ? 0 : std::max<A_long>(0, (A_long)std::llround(sec * job.fps));
+		LoadConfig();
+		job.shotKey = MakeShotKey(job.srcPath);
+		job.cacheDir = g_cfg.cache + L"\\" + job.shotKey;
+		/* 同じ点・コマ・種類なら同じマスク (キャッシュを使う) */
+		wchar_t tag[96];
+		swprintf(tag, 96, L"subject_%d_%d_f%ld_t%d", (int)std::lround(job.pointX), (int)std::lround(job.pointY),
+		         (long)job.promptFrame, job.subjectType);
+		job.subjectDir = job.cacheDir + L"\\" + tag;
+		AutoLog(L"subject: " + job.subjectDir);
+		if (FileExists(job.subjectDir + L"\\manifest.json")) {
+			job.state = JOB_IMPORTING;
+		} else {
+			if (!FileExists(g_cfg.subjectScript) || !FileExists(g_cfg.subjectPython)) {
+				AutoLog(L"subject: script or python not found");
+				ReportInfo(suites, L"DoF Anime: キャラのマスクを自動で作る準備がありません (SAM 3.1 を動かす Python)。\n"
+				                   L"設定の subject_python / subject_script / comfyui_dir を確かめるか、Subject Layer を手で指定してください。");
+				return;
+			}
+			CreateDirectoryW(g_cfg.cache.c_str(), NULL);
+			CreateDirectoryW(job.cacheDir.c_str(), NULL);
+			CreateDirectoryW(job.subjectDir.c_str(), NULL);
+			wchar_t pt[64];
+			swprintf(pt, 64, L"%.1f,%.1f", job.pointX, job.pointY);
+			const std::wstring cmd = L"\"" + g_cfg.subjectPython + L"\" -I \"" + g_cfg.subjectScript + L"\""
+				+ L" --video \"" + job.srcPath + L"\""
+				+ L" --out-dir \"" + job.subjectDir + L"\""
+				+ L" --point " + pt
+				+ L" --frame " + std::to_wstring((long)job.promptFrame)
+				+ L" --text \"" + SubjectText(job.subjectType) + L"\""
+				+ L" --comfyui \"" + g_cfg.comfyuiDir + L"\"";
+			std::wstring err;
+			job.proc = SpawnCommand(cmd, job.subjectDir + L"\\gen.log", err);
+			if (!job.proc) { ReportInfo(suites, L"DoF Anime: " + err); return; }
+			job.state = JOB_RUNNING;
+			keep.push_back(job);
+			return;
+		}
+	}
+	if (job.state == JOB_RUNNING) {
+		if (WaitForSingleObject(job.proc, 0) != WAIT_OBJECT_0) { keep.push_back(job); return; }
+		DWORD code = 1;
+		GetExitCodeProcess(job.proc, &code);
+		CloseHandle(job.proc);
+		job.proc = NULL;
+		AutoLog(L"subject: exited code=" + std::to_wstring((long)code));
+		if (code != 0 || !FileExists(job.subjectDir + L"\\manifest.json")) {
+			std::wstring msg = JsonValue(ReadTextFile(job.subjectDir + L"\\status.json"), L"message");
+			ReportInfo(suites, L"DoF Anime: キャラのマスクを作れませんでした。Subject Layer を手で指定することもできます。\n" + msg +
+			                   L"\n詳細: " + job.subjectDir + L"\\gen.log");
+			return;
+		}
+		job.state = JOB_IMPORTING;
+	}
+	if (job.state == JOB_IMPORTING) {
+		std::wstring err;
+		const bool ok = ImportSubject(suites, job, err);
+		AutoLog(L"subject: import " + std::wstring(ok ? L"ok" : L"failed: ") + err);
+		if (!ok) ReportInfo(suites, L"DoF Anime: キャラのマスクの読み込みに失敗しました。\n" + err);
+	}
+}
+
+/* ------------------------------------------------------------------ */
 /* アイドルフック                                                       */
 /* ------------------------------------------------------------------ */
 
@@ -856,6 +1115,7 @@ static void ProcessJobs()
 
 	for (AutoJob &job : jobs) {
 		try {
+			if (job.subject) { ProcessSubjectJob(suites, job, keep); continue; }
 			if (job.state == JOB_QUEUED) {
 				AEGP_LayerH layerH = NULL;
 				A_Err e = suites.LayerSuite9()->AEGP_GetLayerFromLayerID(job.compH, job.layerId, &layerH);
@@ -863,7 +1123,11 @@ static void ProcessJobs()
 				std::vector<AEGP_EffectRefH> effects;
 				CollectEffects(suites, layerH, job.force, effects);
 				AutoLog(L"IdleHook: effects needing passes=" + std::to_wstring(effects.size()));
-				if (effects.empty()) continue;   /* 自動生成不要 */
+				if (effects.empty()) {
+					/* 深度は結線済み。キャラのマスクがまだなら続けて作る */
+					keep.push_back(MakeSubjectJob(job.compH, job.layerId, false));
+					continue;
+				}
 				for (AEGP_EffectRefH eH : effects) suites.EffectSuite4()->AEGP_DisposeEffect(eH);
 
 				job.srcPath = GetLayerSourcePath(suites, layerH, job.isStill);
@@ -981,6 +1245,7 @@ static void ProcessJobs()
 				bool ok = ImportAndWire(suites, job, err);
 				AutoLog(L"IdleHook: import " + std::wstring(ok ? L"ok" : L"failed: ") + err);
 				if (!ok) ReportInfo(suites, L"DoF Anime: パスの読み込みに失敗しました。\n" + err);
+				else keep.push_back(MakeSubjectJob(job.compH, job.layerId, false));   /* 続けてキャラのマスク */
 				continue;
 			}
 		} catch (...) {
@@ -1160,7 +1425,12 @@ static void UpdateProgress()
 		for (const AutoJob &j : g_jobs) {
 			if (j.state != JOB_EXTRACTING && j.state != JOB_RUNNING && j.state != JOB_IMPORTING) continue;
 			if (++active > 1) continue;
-			if (j.state == JOB_EXTRACTING) {
+			if (j.subject) {
+				std::wstring st = ReadTextFile(j.subjectDir + L"\\status.json");
+				float p = (float)_wtof(JsonValue(st, L"progress").c_str());
+				value = j.state == JOB_RUNNING ? std::max(0.f, std::min(1.f, p)) : 0.99f;
+				text = j.state == JOB_RUNNING ? L"キャラのマスクを作成中 (SAM 3.1)" : L"マスクを結線中";
+			} else if (j.state == JOB_EXTRACTING) {
 				/* 全体の 0〜30%: AE に素材を描かせて書き出す */
 				value = 0.30f * (float)j.nextFrame / (float)std::max<A_long>(1, j.frames);
 				text = L"素材を読み込み中 " + std::to_wstring(j.nextFrame) + L" / " + std::to_wstring(j.frames) + L" フレーム";
@@ -1304,6 +1574,28 @@ void Auto_Request(PF_InData *in_data, bool force, int engine)
 		AutoLog(L"Auto_Request: queued layerId=" + std::to_wstring((long)job.layerId) + (force ? L" (force)" : L"") + L" engine=" + job.engine + (job.engine == L"remote" ? L" model=" + job.remoteModel : L""));
 	} catch (...) {
 		AutoLog(L"Auto_Request: exception");
+	}
+}
+
+void Auto_RequestSubject(PF_InData *in_data, bool force)
+{
+	if (!g_hookRegistered) Auto_Init(in_data);
+	if (!g_hookRegistered) return;
+	try {
+		AEGP_SuiteHandler suites(in_data->pica_basicP);
+		AEGP_LayerH layerH = NULL;
+		if (suites.PFInterfaceSuite1()->AEGP_GetEffectLayer(in_data->effect_ref, &layerH) != A_Err_NONE || !layerH) return;
+		AEGP_CompH compH = NULL;
+		AEGP_LayerIDVal id = 0;
+		if (suites.LayerSuite9()->AEGP_GetLayerParentComp(layerH, &compH) != A_Err_NONE || !compH) return;
+		if (suites.LayerSuite9()->AEGP_GetLayerID(layerH, &id) != A_Err_NONE) return;
+		std::lock_guard<std::mutex> lk(g_mtx);
+		for (const AutoJob &j : g_jobs)
+			if (j.layerId == id && j.subject) { AutoLog(L"Auto_RequestSubject: already in progress"); return; }
+		g_jobs.push_back(MakeSubjectJob(compH, id, force));
+		AutoLog(L"Auto_RequestSubject: queued layerId=" + std::to_wstring((long)id) + (force ? L" (force)" : L""));
+	} catch (...) {
+		AutoLog(L"Auto_RequestSubject: exception");
 	}
 }
 

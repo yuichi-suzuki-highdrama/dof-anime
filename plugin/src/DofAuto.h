@@ -19,6 +19,10 @@ void Auto_Init(PF_InData *in_data);
    engine = Depth Engine の選択 (1: この PC、2: 別の PC の深度サーバーで小さいモデル、3: 同じく大きいモデル) */
 void Auto_Request(PF_InData *in_data, bool force, int engine = 1);
 
+/* 「Generate Subject」ボタン。今の時刻の Focus Point にいるキャラのマスクを、動画全体について作って Subject Layer に結線する
+   (SAM 3.1、tools/subject_mask.py)。深度を作り終えたときにも、Auto Subject がオンなら自動で呼ばれる */
+void Auto_RequestSubject(PF_InData *in_data, bool force);
+
 /* <cache>\dof_auto.log へ 1 行書く (描画スレッドからも呼べる) */
 #include <string>
 void Dof_Log(const std::wstring &msg);
