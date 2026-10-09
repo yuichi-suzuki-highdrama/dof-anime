@@ -785,6 +785,18 @@ static PF_Err SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRend
 	}
 	const auto t0 = std::chrono::steady_clock::now();
 	float focusUsed = -1.f;
+	{
+		/* 調べもの: 深度ありの描画を始める前に 1 回だけ記録する (落ちた場所を絞るため) */
+		static std::atomic<int> traced(0);
+		if (depthP && traced.fetch_add(1) < 3)
+			RenderLog(std::wstring(L"render: begin with depth ") + (isGPU ? L"gpu" : L"cpu") +
+			          L" in=" + std::to_wstring(inputP ? (long)inputP->width : 0L) + L"x" + std::to_wstring(inputP ? (long)inputP->height : 0L) +
+			          L" out=" + std::to_wstring(outputP ? (long)outputP->width : 0L) + L"x" + std::to_wstring(outputP ? (long)outputP->height : 0L) +
+			          L" depth=" + std::to_wstring((long)depthP->width) + L"x" + std::to_wstring((long)depthP->height) +
+			          L" nb=" + std::to_wstring(nbN) +
+			          L" rect=" + std::to_wstring(prd ? (long)(prd->depthRect.right - prd->depthRect.left) : -1L) +
+			          L" origin=" + std::to_wstring(prd ? (long)prd->originX : 0L) + L"," + std::to_wstring(prd ? (long)prd->originY : 0L));
+	}
 
 	try {
 	if (!err && inputP && outputP) {
@@ -922,6 +934,10 @@ static void LayerToFrame(PF_InData *in_data, PF_EventExtra *ex, float lx, float 
 static PF_Err DrawFocusGizmo(PF_InData *in_data, PF_ParamDef *params[], PF_EventExtra *ex)
 {
 	PF_Err err = PF_Err_NONE;
+	{
+		static std::atomic<int> traced(0);
+		if (traced.fetch_add(1) < 2) Dof_Log(L"gizmo: draw");
+	}
 	if (params[DOF_FOCUS_MODE]->u.pd.value != FOCUS_POINT) return err;
 	AEGP_SuiteHandler suites(in_data->pica_basicP);
 	DRAWBOT_DrawRef drawRef = NULL;

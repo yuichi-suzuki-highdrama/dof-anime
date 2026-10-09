@@ -181,6 +181,8 @@ struct AutoJob {
 	DWORD           startTick;
 	std::wstring    engine;        /* native / comfyui (設定の engine) / remote (Depth Engine = Remote) */
 	std::wstring    remoteModel;   /* remote のときの深度のモデル (Fast = vits、Quality = vitl) */
+	/* 依頼を受けた時刻。これから QUEUE_DELAY_MS たつまで手を付けない */
+	DWORD           queuedTick = 0;
 	/* キャラのマスクのジョブ (subject = true) */
 	bool            subject = false;
 	std::wstring    subjectDir;    /* cache\<素材>\subject_<点・コマ・種類> */
@@ -188,6 +190,11 @@ struct AutoJob {
 	A_long          promptFrame = 0;               /* 点を見るコマ */
 	int             subjectType = 1;               /* 1: Anime Character  2: Person  3: Animal */
 };
+
+/* 依頼を受けてから、プロジェクトを書き換え始めるまでの待ち時間 (ミリ秒)。
+   エフェクトを掛けた直後にスクリプトや操作が続いていると、その途中でアイドルフックが呼ばれることがある。
+   そこでレイヤーを足すと AE が落ちた (スクリプトでエフェクトを掛けてすぐ値を書き換えたとき) ので、少し待つ */
+static const DWORD QUEUE_DELAY_MS = 1500;
 
 /* この PC で AE にフレームを描かせて relight_depth.exe で作るか */
 static bool IsNativeJob(const AutoJob &job) { return job.engine != L"comfyui" && job.engine != L"remote"; }
@@ -806,17 +813,21 @@ static bool ImportAndWire(AEGP_SuiteHandler &suites, AutoJob &job, std::wstring 
 	std::wstring fmt = JsonValue(manifest, L"format");
 	const wchar_t *ext = (fmt == L"exr") ? L".exr" : L".png";
 
+	AutoLog(L"import: start (effects=" + std::to_wstring(effects.size()) + L")");
 	suites.UtilitySuite6()->AEGP_StartUndoGroup("DoF Anime: Auto Depth");
 	/* 同じ深度の連番のレイヤーがコンポにあればそれを使う。無ければ読み込んで追加する */
 	AEGP_LayerH depthL = job.force ? NULL : FindLayerWithSource(suites, job.compH, job.cacheDir + L"\\depth\\depth.00001" + ext);
+	AutoLog(L"import: searched the comp");
 	if (depthL) AutoLog(L"import: reuse the depth layer already in the comp");
 	else depthL = AddPassLayer(suites, job, srcLayerH, job.cacheDir + L"\\depth\\depth.00001" + ext, L"DoF depth", err);
 	bool ok = (depthL != NULL);
 	AEGP_LayerIDVal depthId = 0;
 	if (ok) {
 		suites.LayerSuite9()->AEGP_GetLayerID(depthL, &depthId);
+		AutoLog(L"import: layer added, wiring");
 		for (AEGP_EffectRefH eH : effects) {
 			SetStreamLayerId(suites, eH, L"Depth Layer", depthId);
+			AutoLog(L"import: wired Depth Layer");
 			/* PNG は変換無しで読めるので Linear、EXR は AE が変換するので sRGB decode */
 			SetStreamOneD(suites, eH, L"Pass Encoding", (fmt == L"exr") ? 2.0 : 1.0);
 		}
@@ -947,6 +958,7 @@ static AutoJob MakeSubjectJob(AEGP_CompH compH, AEGP_LayerIDVal layerId, bool fo
 	job.promptFrame = 0;
 	job.pointX = job.pointY = 0.0;
 	job.subjectType = 1;
+	job.queuedTick = GetTickCount();
 	return job;
 }
 
@@ -1115,6 +1127,7 @@ static void ProcessJobs()
 
 	for (AutoJob &job : jobs) {
 		try {
+			if (job.state == JOB_QUEUED && GetTickCount() - job.queuedTick < QUEUE_DELAY_MS) { keep.push_back(job); continue; }
 			if (job.subject) { ProcessSubjectJob(suites, job, keep); continue; }
 			if (job.state == JOB_QUEUED) {
 				AEGP_LayerH layerH = NULL;
@@ -1471,7 +1484,9 @@ static LRESULT CALLBACK TimerWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 		}
 		if (!pending) g_pendingSince = 0;
 		else if (!g_pendingSince) g_pendingSince = GetTickCount();
-		if (pending && !g_helperTick && GetTickCount() - g_pendingSince > 5000) {
+		/* 補助 AEGP が読み込まれているなら、呼ばれるまで待つ (タイマーから AEGP を呼ぶと「no current context」になる)。
+		   補助 AEGP が入っていないときだけ、タイマーから処理する (旧方式。不安定) */
+		if (pending && !g_helperTick && !GetModuleHandleW(L"DoFAnimeHelper.aex") && GetTickCount() - g_pendingSince > 5000) {
 			static bool warned = false;
 			if (!warned) { warned = true; AutoLog(L"timer: helper AEGP not found, fallback to timer processing"); }
 			try { ProcessJobs(); } catch (...) { g_processing = false; AutoLog(L"Timer: exception"); }
@@ -1560,6 +1575,7 @@ void Auto_Request(PF_InData *in_data, bool force, int engine)
 		}
 		job.remoteModel = engine == 3 ? L"video_depth_anything_vitl.pth" : L"video_depth_anything_vits.pth";
 		job.startTick = 0;
+		job.queuedTick = GetTickCount();
 		if (suites.LayerSuite9()->AEGP_GetLayerParentComp(layerH, &job.compH) != A_Err_NONE || !job.compH) return;
 		if (suites.LayerSuite9()->AEGP_GetLayerID(layerH, &job.layerId) != A_Err_NONE) return;
 		std::lock_guard<std::mutex> lk(g_mtx);

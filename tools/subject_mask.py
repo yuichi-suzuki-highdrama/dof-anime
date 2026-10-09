@@ -25,13 +25,22 @@ import time
 from pathlib import Path
 
 
-def write_json(path, obj):
+def write_json(path, obj, must=False):
+    """書いてから差し替える。DoF Anime の進み具合の窓が同じときに読んでいると差し替えに失敗するので、
+    少し待って何度か試す。進み具合 (must=False) なら、それでもだめなら今回は書かない"""
     if not path:
         return
     tmp = str(path) + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False)
-    os.replace(tmp, path)
+    for i in range(20):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            time.sleep(0.05)
+    if must:
+        raise PermissionError(f"書き込めません: {path}")
 
 
 def main():
@@ -177,8 +186,8 @@ def main():
         write_json(out / "manifest.json", {
             "generator": "subject_mask.py", "model": "sam3.1_multiplex", "text": a.text,
             "point": [px, py], "frame": k, "start": how, "frames": N, "size": [W, H], "fps": fps,
-            "file": "subject.%05d.png", "seconds": round(time.time() - t0, 1)})
-        write_json(status, {"state": "done", "pid": os.getpid(), "progress": 1.0})
+            "file": "subject.%05d.png", "seconds": round(time.time() - t0, 1)}, must=True)
+        write_json(status, {"state": "done", "pid": os.getpid(), "progress": 1.0}, must=True)
         print(f"done: {N} frames in {time.time() - t0:.1f}s", flush=True)
         return 0
     except Exception as e:  # noqa: BLE001
