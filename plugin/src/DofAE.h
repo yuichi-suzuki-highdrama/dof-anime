@@ -41,6 +41,9 @@ enum {
 	DOF_FOCUS_POINT,
 	DOF_FOCUS_DEPTH,
 	DOF_FOCUS_RANGE,
+	DOF_SUBJECT_LAYER,        /* キャラのマスク (ロトブラシなど)。この中はくっきり残す */
+	DOF_SUBJECT_CHANNEL,      /* 1: Alpha  2: Luminance */
+	DOF_SUBJECT_AMOUNT,
 	DOF_TOPIC_FOCUS_END,
 
 	/* --- Blur --- */
@@ -93,6 +96,9 @@ enum {
 	ID_FOCUS_DEPTH,
 	ID_FOCUS_RANGE,
 	ID_TOPIC_FOCUS_END,
+	ID_SUBJECT_LAYER,
+	ID_SUBJECT_CHANNEL,
+	ID_SUBJECT_AMOUNT,
 
 	ID_TOPIC_BLUR = 50,
 	ID_BLUR_SIZE,
@@ -129,6 +135,8 @@ struct PreRenderData {
 	A_long   originY;
 	PF_LRect depthRect; /* 深度レイヤーは全体を取り出す。その範囲 (深度レイヤー自身の座標) */
 	bool     depthChecked;
+	PF_LRect subjectRect; /* キャラのマスクのレイヤーも全体を取り出す */
+	bool     subjectChecked;
 	/* 深度を時間方向にならすための前後のフレーム */
 	int      nbCount;
 	int      nbOff[4];

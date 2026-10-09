@@ -145,14 +145,14 @@ static const float *HostLut()
  * nb / nbCount: 前後のフレームの深度ワールド。out: 結果 (premultiplied、表示の値、outW x outH)
  * 戻り値: 使ったピントの深度
  */
-static float RenderFrameCPU(DofContext &c, const DfImage &src, const DfAuxMap &depthMap,
+static float RenderFrameCPU(DofContext &c, const DfImage &src, const DfAuxMap &depthMap, const DfAuxMap &subjectMap,
                             const DfImage *nb, int nbCount, std::vector<DfRgba> &out)
 {
 	const int W = c.outW, H = c.outH;
 	const size_t NP = (size_t)W * H;
 	c.lutDec = HostLut();
 	c.lutEnc = c.lutDec + DF_LUT_SIZE;
-	c.depth = c.coc = c.tileR = NULL;
+	c.depth = c.coc = c.tileR = c.subject = NULL;
 	dfSetupFrame(c, c.p.focusDepth);
 
 	/* 1. リニアの色と縮小 */
@@ -168,7 +168,7 @@ static float RenderFrameCPU(DofContext &c, const DfImage &src, const DfAuxMap &d
 	for (int k = 0; k < DF_LEVELS; ++k) c.lin[k] = lin[k].data();
 
 	/* 2. 深度 → ピント → ぼけの大きさ */
-	std::vector<float> low, depth, tmp, coc, tileMax, tileR;
+	std::vector<float> low, depth, tmp, coc, tileMax, tileR, subject;
 	float focus = c.p.focusDepth;
 	if (depthMap.img.data) {
 		const int dw = depthMap.img.width, dh = depthMap.img.height;
@@ -193,7 +193,20 @@ static float RenderFrameCPU(DofContext &c, const DfImage &src, const DfAuxMap &d
 			parallelRows(H, [&](A_long y) { for (int x = 0; x < W; ++x) tmp[(size_t)y * W + x] = dfExpand1D(depth.data(), W, H, rad, true, x, (int)y); });
 			parallelRows(H, [&](A_long y) { for (int x = 0; x < W; ++x) depth[(size_t)y * W + x] = dfExpand1D(tmp.data(), W, H, rad, false, x, (int)y); });
 		}
-		parallelRows(H, [&](A_long y) { for (int x = 0; x < W; ++x) coc[(size_t)y * W + x] = dfCoc(&c, depth[(size_t)y * W + x]); });
+		/* キャラのマスクの中はぼかさない (深度がキャラの中で揺れても、体全体をくっきり残す) */
+		if (subjectMap.img.data && c.p.subjectAmount > 0.f) {
+			subject.resize(NP);
+			parallelRows(H, [&](A_long y) { for (int x = 0; x < W; ++x) subject[(size_t)y * W + x] = dfSubjectAt(subjectMap, c.p.subjectChannel, x, (int)y); });
+			c.subject = subject.data();
+		}
+		parallelRows(H, [&](A_long y) {
+			for (int x = 0; x < W; ++x) {
+				const size_t n = (size_t)y * W + x;
+				float r = dfCoc(&c, depth[n]);
+				if (c.subject) r *= 1.f - dfSat(c.subject[n] * c.p.subjectAmount);
+				coc[n] = r;
+			}
+		});
 		c.depth = depth.data();
 		c.coc = coc.data();
 
@@ -333,6 +346,18 @@ static PF_Err ParamsSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef 
 	AEFX_CLR_STRUCT(def);
 	PF_ADD_FLOAT_SLIDERX("Focus Range", 0.f, 0.5f, 0.f, 0.2f, DEF_FOCUS_RANGE,
 		PF_Precision_THOUSANDTHS, PF_ValueDisplayFlag_NONE, 0, ID_FOCUS_RANGE);
+
+	/* キャラのマスク (ロトブラシで切り抜いたレイヤーなど)。この中はぼかさず、手前のぼけも重ねない。
+	   推定した深度はキャラの中でも揺れる (髪の先・脚・フリル) ので、体全体をくっきり残したいときに使う */
+	AEFX_CLR_STRUCT(def);
+	PF_ADD_LAYER("Subject Layer", PF_LayerDefault_NONE, ID_SUBJECT_LAYER);
+
+	AEFX_CLR_STRUCT(def);
+	PF_ADD_POPUP("Subject Channel", 2, 1, "Alpha|Luminance", ID_SUBJECT_CHANNEL);
+
+	AEFX_CLR_STRUCT(def);
+	PF_ADD_FLOAT_SLIDERX("Keep Subject Sharp", 0.f, 100.f, 0.f, 100.f, 100.f,
+		PF_Precision_INTEGER, PF_ValueDisplayFlag_PERCENT, 0, ID_SUBJECT_AMOUNT);
 
 	AEFX_CLR_STRUCT(def);
 	PF_END_TOPIC(ID_TOPIC_FOCUS_END);
@@ -530,6 +555,8 @@ static PF_Err ReadDofParams(PF_InData *in_data, DofParams &p)
 	p.focusX = fp[0]; p.focusY = fp[1];
 	p.focusDepth  = dfSat(r.fs(DOF_FOCUS_DEPTH, DEF_FOCUS_DEPTH));
 	p.focusRange  = dfMax(0.f, r.fs(DOF_FOCUS_RANGE, DEF_FOCUS_RANGE));
+	p.subjectChannel = (int)r.popup(DOF_SUBJECT_CHANNEL, 1);
+	p.subjectAmount  = dfSat(r.fs(DOF_SUBJECT_AMOUNT, 100.f) / 100.f);
 	p.blurSize    = dfMax(0.f, r.fs(DOF_BLUR_SIZE, DEF_BLUR_SIZE));
 	p.nearScale   = dfMax(0.f, r.fs(DOF_NEAR_BLUR, 1.f));
 	p.farScale    = dfMax(0.f, r.fs(DOF_FAR_BLUR, 1.f));
@@ -607,26 +634,29 @@ static PF_Err PreRender(PF_InData *in_data, PF_OutData *out_data, PF_PreRenderEx
 	extra->output->pre_render_data = prd;
 	extra->output->delete_pre_render_data_func = DeletePreRenderData;
 
-	/* 深度レイヤーは全体を取り出す (Relight Anime と同じ。まず 1 画素だけ要求して全体の範囲を知る)。
+	/* 深度レイヤーとキャラのマスクのレイヤーは全体を取り出す (Relight Anime と同じ。まず 1 画素だけ要求して全体の範囲を知る)。
 	   未指定でも番号は予約しておく (予約していない番号を取り出すと AE が「Unknown checkout id」を出す) */
-	{
+	for (int which = 0; which < 2; ++which) {
+		const A_long idx = which == 0 ? DOF_DEPTH_LAYER : DOF_SUBJECT_LAYER;
+		PF_LRect &rect = which == 0 ? prd->depthRect : prd->subjectRect;
+		bool &checked = which == 0 ? prd->depthChecked : prd->subjectChecked;
 		PF_CheckoutResult probe;
 		AEFX_CLR_STRUCT(probe);
 		PF_RenderRequest probeReq = req;
 		probeReq.rect.left = 0; probeReq.rect.top = 0; probeReq.rect.right = 1; probeReq.rect.bottom = 1;
 		PF_LRect full;
 		AEFX_CLR_STRUCT(full);
-		if (extra->cb->checkout_layer(in_data->effect_ref, DOF_DEPTH_LAYER, DOF_DEPTH_LAYER + 100, &probeReq,
+		if (extra->cb->checkout_layer(in_data->effect_ref, idx, idx + 100, &probeReq,
 		                              in_data->current_time, in_data->time_step, in_data->time_scale, &probe) == PF_Err_NONE)
 			full = probe.max_result_rect;
 		PF_CheckoutResult aux;
 		AEFX_CLR_STRUCT(aux);
 		PF_RenderRequest auxReq = req;
 		auxReq.rect = (full.right > full.left && full.bottom > full.top) ? full : in_result.result_rect;
-		if (extra->cb->checkout_layer(in_data->effect_ref, DOF_DEPTH_LAYER, DOF_DEPTH_LAYER, &auxReq,
+		if (extra->cb->checkout_layer(in_data->effect_ref, idx, idx, &auxReq,
 		                              in_data->current_time, in_data->time_step, in_data->time_scale, &aux) == PF_Err_NONE) {
-			prd->depthChecked = true;
-			if (full.right > full.left && full.bottom > full.top) prd->depthRect = aux.result_rect;
+			checked = true;
+			if (full.right > full.left && full.bottom > full.top) rect = aux.result_rect;
 		}
 	}
 
@@ -703,7 +733,7 @@ static PF_Err SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRend
 {
 	PF_Err err = PF_Err_NONE, err2 = PF_Err_NONE;
 
-	PF_EffectWorld *inputP = NULL, *outputP = NULL, *depthP = NULL;
+	PF_EffectWorld *inputP = NULL, *outputP = NULL, *depthP = NULL, *subjectP = NULL;
 	ERR(extra->cb->checkout_layer_pixels(in_data->effect_ref, DOF_INPUT, &inputP));
 	ERR(extra->cb->checkout_output(in_data->effect_ref, &outputP));
 
@@ -712,6 +742,9 @@ static PF_Err SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRend
 		if (!prd || !prd->depthChecked || extra->cb->checkout_layer_pixels(in_data->effect_ref, DOF_DEPTH_LAYER, &depthP)) depthP = NULL;
 		if (depthP && !isGPU && !depthP->data) depthP = NULL;
 		if (depthP && depthP->width <= 0) depthP = NULL;
+		if (!prd || !prd->subjectChecked || extra->cb->checkout_layer_pixels(in_data->effect_ref, DOF_SUBJECT_LAYER, &subjectP)) subjectP = NULL;
+		if (subjectP && !isGPU && !subjectP->data) subjectP = NULL;
+		if (subjectP && subjectP->width <= 0) subjectP = NULL;
 	}
 
 	/* 前後のフレームの深度。大きさが違うものは使わない */
@@ -758,16 +791,21 @@ static PF_Err SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRend
 		ctx.originY = originY;
 		ctx.layerW  = layerW;
 		ctx.layerH  = layerH;
-		auto depthMapOf = [&](const DfImage &img) {
+		/* 補助レイヤー全体の大きさ。PreRender で取れなかったときは、取り出したワールドの大きさを全体とみなす */
+		auto auxMapOf = [&](const DfImage &img, const PF_LRect &rect, const PF_EffectWorld *w) {
 			float fw = 1.f, fh = 1.f;
-			if (prd && prd->depthRect.right > prd->depthRect.left) {
-				fw = (float)(prd->depthRect.right - prd->depthRect.left);
-				fh = (float)(prd->depthRect.bottom - prd->depthRect.top);
-			} else if (depthP) {
-				fw = (float)depthP->width; fh = (float)depthP->height;
+			if (rect.right > rect.left) {
+				fw = (float)(rect.right - rect.left);
+				fh = (float)(rect.bottom - rect.top);
+			} else if (w) {
+				fw = (float)w->width; fh = (float)w->height;
 			}
 			return dfMakeAuxMap(img, fw, fh, originX, originY, layerW, layerH);
 		};
+		PF_LRect noRect;
+		AEFX_CLR_STRUCT(noRect);
+		auto depthMapOf = [&](const DfImage &img) { return auxMapOf(img, prd ? prd->depthRect : noRect, depthP); };
+		auto subjectMapOf = [&](const DfImage &img) { return auxMapOf(img, prd ? prd->subjectRect : noRect, subjectP); };
 
 		if (!isGPU) {
 			PF_PixelFormat fmt = PF_PixelFormat_ARGB32;
@@ -778,7 +816,7 @@ static PF_Err SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRend
 			DfImage nbImg[4];
 			for (int k = 0; k < nbN; ++k) nbImg[k] = ImageOf(nbW[k], code);
 			std::vector<DfRgba> buf;
-			focusUsed = RenderFrameCPU(ctx, ImageOf(inputP, code), depthMap, nbImg, nbN, buf);
+			focusUsed = RenderFrameCPU(ctx, ImageOf(inputP, code), depthMap, subjectMapOf(ImageOf(subjectP, code)), nbImg, nbN, buf);
 			WriteWorld(outputP, fmt, buf);
 		} else {
 			AEFX_SuiteScoper<PF_GPUDeviceSuite1> gpu(in_data, kPFGPUDeviceSuite, kPFGPUDeviceSuiteVersion1, out_data);
@@ -794,11 +832,12 @@ static PF_Err SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRend
 					if (w && gpu->GetGPUWorldData(in_data->effect_ref, w, &ptr) != PF_Err_NONE) ptr = NULL;
 					return ptr;
 				};
-				void *srcMem = mem(inputP), *dstMem = mem(outputP), *depthMem = mem(depthP);
+				void *srcMem = mem(inputP), *dstMem = mem(outputP), *depthMem = mem(depthP), *subjectMem = mem(subjectP);
 				DfGpuFrame f;
 				std::memset(&f, 0, sizeof(f));
 				f.ctx = ctx;
 				f.depthMap    = depthMapOf(ImageOf(depthMem ? depthP : NULL, DF_FMT_BGRA32F, depthMem));
+				f.subjectMap  = subjectMapOf(ImageOf(subjectMem ? subjectP : NULL, DF_FMT_BGRA32F, subjectMem));
 				f.src         = ImageOf(inputP, DF_FMT_BGRA32F, srcMem);
 				f.dst         = dstMem;
 				f.dstRowbytes = outputP->rowbytes;
@@ -837,16 +876,17 @@ static PF_Err SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRend
 	{
 		const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 		wchar_t line[320];
-		swprintf(line, 320, L"render: t=%ld/%lu %ldx%ld %ls ds=%.2f mode=%d focus=%.3f blur=%.1f out=%d depth=%d err=%d %.0f ms",
+		swprintf(line, 320, L"render: t=%ld/%lu %ldx%ld %ls ds=%.2f mode=%d focus=%.3f blur=%.1f out=%d depth=%d subject=%d err=%d %.0f ms",
 			(long)in_data->current_time, (unsigned long)in_data->time_scale,
 			outputP ? (long)outputP->width : 0L, outputP ? (long)outputP->height : 0L, isGPU ? L"gpu" : L"cpu", dsx,
-			p.focusMode, focusUsed, p.blurSize, p.outputMode, depthP ? 1 + nbN : 0, (int)err, ms);
+			p.focusMode, focusUsed, p.blurSize, p.outputMode, depthP ? 1 + nbN : 0, subjectP ? 1 : 0, (int)err, ms);
 		RenderLogThrottled(line);
 	}
 
 	for (A_long id : nbCheckedOut) ERR2(extra->cb->checkin_layer_pixels(in_data->effect_ref, id));
 	ERR2(extra->cb->checkin_layer_pixels(in_data->effect_ref, DOF_INPUT));
 	if (depthP) ERR2(extra->cb->checkin_layer_pixels(in_data->effect_ref, DOF_DEPTH_LAYER));
+	if (subjectP) ERR2(extra->cb->checkin_layer_pixels(in_data->effect_ref, DOF_SUBJECT_LAYER));
 	return err;
 }
 

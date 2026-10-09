@@ -13,6 +13,7 @@ struct DfGpuFrame {
 	DofContext ctx;
 	DfImage    src;          /* 入力 (GPU のワールド、BGRA float) */
 	DfAuxMap   depthMap;     /* 深度ワールドと位置合わせ (img.data が NULL なら深度なし) */
+	DfAuxMap   subjectMap;   /* キャラのマスクのワールド (img.data が NULL なら無し) */
 	void      *dst;          /* 出力 (GPU のワールド、BGRA float) */
 	int        dstRowbytes;
 	/* 前後のフレームの深度ワールド (深度を時間方向にならす。深度ワールドと同じ大きさ) */

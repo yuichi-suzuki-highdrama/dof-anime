@@ -70,6 +70,8 @@ struct DofParams {
 	float focusX, focusY;     /* Focus Point (レイヤー座標、ダウンサンプル後) */
 	float focusDepth;         /* Focus Mode = Depth のときの深度 (0..1、近い = 1) */
 	float focusRange;         /* ピントの合う幅 (深度の差がこれ以下ならぼかさない) */
+	int   subjectChannel;     /* Subject Layer の読み方 1: アルファ  2: 明るさ */
+	float subjectAmount;      /* Subject Layer の中をどれだけくっきり残すか (0..1) */
 	float blurSize;           /* 深度の差 0.5 のときのぼけの半径 (1080p でのピクセル数) */
 	float nearScale;          /* 手前のぼけの倍率 */
 	float farScale;           /* 奥のぼけの倍率 */
@@ -253,6 +255,7 @@ struct DofContext {
 	const float *depth;       /* 深度 (近い = 1) */
 	const float *coc;         /* 符号付きのぼけの半径 (手前 = 負) */
 	const float *tileR;       /* 区画ごとの、届きうるぼけの最大の半径 */
+	const float *subject;     /* キャラのマスク (0..1、出力の大きさ。NULL なら無し) */
 	/* リニアの色 (premultiplied、RGBA の順に 4 個ずつ)。lin[0] が出力の大きさ、lin[k] は 1/2^k */
 	const float *lin[DF_LEVELS];
 	int   lw[DF_LEVELS], lh[DF_LEVELS];
@@ -369,6 +372,22 @@ DF_HD DF_INL float dfExpand1D(const float *in, int W, int H, int rad, bool horiz
 		m = dfMax(m, in[(size_t)yy * W + xx]);
 	}
 	return m;
+}
+
+/* キャラのマスク (Subject Layer) の 1 画素 (0..1)。深度と同じく、レイヤー全体を取り出して位置の割合で合わせる */
+DF_HD DF_INL float dfSubjectAt(const DfAuxMap &m, int channel, int x, int y)
+{
+	if (!m.img.data) return 0.f;
+	const float fx = dfClamp((float)x * m.sx + m.ox, 0.f, (float)(m.img.width - 1));
+	const float fy = dfClamp((float)y * m.sy + m.oy, 0.f, (float)(m.img.height - 1));
+	const int x0 = (int)fx, y0 = (int)fy;
+	const float tx = fx - (float)x0, ty = fy - (float)y0;
+	float v[4];
+	for (int k = 0; k < 4; ++k) {
+		const DfRgba p = dfRead(m.img, x0 + (k & 1), y0 + (k >> 1));
+		v[k] = channel == 2 ? 0.2126f * p.r + 0.7152f * p.g + 0.0722f * p.b : p.a;   /* 明るさは premultiplied のまま (透明な所は 0) */
+	}
+	return dfSat(dfMix(dfMix(v[0], v[1], tx), dfMix(v[2], v[3], tx), ty));
 }
 
 /* ピントの深度からの差 → 符号付きのぼけの半径 (出力の画素。手前 = 負) */
@@ -571,7 +590,9 @@ DF_HD DF_INL void dfGather(const DofContext *c, int x, int y, float R, float *ou
 	float back[4];
 	if (bgW > 1e-8f) for (int k = 0; k < 4; ++k) back[k] = bg[k] / bgW;
 	else for (int k = 0; k < 4; ++k) back[k] = center[k];
-	const float alpha = dfSat(cover);
+	/* キャラの上には手前のぼけを重ねない (キャラはいちばん上のセルとして扱う) */
+	const float keep = c->subject ? dfSat(c->subject[np] * c->p.subjectAmount) : 0.f;
+	const float alpha = dfSat(cover) * (1.f - keep);
 	if (fgW > 1e-8f && alpha > 0.f) {
 		for (int k = 0; k < 4; ++k) out[k] = dfMix(back[k], fg[k] / fgW, alpha);
 	} else {

@@ -6,7 +6,8 @@
  *   キー: fx fy (Focus Point、レイヤー px)、fmode (1 Point / 2 Depth)、fdepth、frange、
  *         blur (Blur Size、1080p の px)、near、far、expand、shape (1 円 / 2 六角形 / 3 八角形)、rot (度)、
  *         hl (Highlights)、hlth (Highlight Threshold)、quality (1..3)、snap (0/1)、mode (1..4)、mix (0..1)、
- *         gpu=1 (GPU 版で描く)、nb=ファイル (前後のフレームの深度、4 個まで)、repeat=N (時間を測る回数)
+ *         gpu=1 (GPU 版で描く)、nb=ファイル (前後のフレームの深度、4 個まで)、repeat=N (時間を測る回数)、
+ *         subject=ファイル (キャラのマスク、W x H の 1 チャンネル 0..1)、keep (Keep Subject Sharp 0..1)
  * src.f32 は sRGB の RGBA (非乗算、alpha 込み)、depth.f32 は 1 チャンネル (近い = 1)。
  * 標準出力に、使ったピントの深度と処理時間を書く。
  */
@@ -47,7 +48,9 @@ int main(int argc, char **argv)
 	p.shape = SHAPE_CIRCLE; p.shapeRotation = 0.f; p.highlights = DEF_HIGHLIGHTS; p.highlightThreshold = DEF_HIGHLIGHT_THR;
 	p.quality = QUALITY_NORMAL; p.depthNear = 1; p.depthSnap = true; p.depthStabilize = 0; p.passEncoding = 1;
 	p.inputLinear = false; p.outputMode = OUTPUT_FINAL; p.mix = 1.f;
+	p.subjectChannel = 1; p.subjectAmount = 1.f;
 	std::vector<std::string> nbFiles;
+	std::string subjectFile;
 	for (int i = 6; i < argc; ++i) {
 		std::string a = argv[i];
 		size_t eq = a.find('=');
@@ -59,6 +62,8 @@ int main(int argc, char **argv)
 		else if (k == "gpu") useGpu = std::atoi(v.c_str());
 		else if (k == "repeat") repeat = std::max(1, std::atoi(v.c_str()));
 		else if (k == "nb") nbFiles.push_back(v);
+		else if (k == "subject") subjectFile = v;
+		else if (k == "keep") p.subjectAmount = f;
 		else if (k == "fx") p.focusX = f;
 		else if (k == "fy") p.focusY = f;
 		else if (k == "fmode") p.focusMode = (int)f;
@@ -82,6 +87,16 @@ int main(int argc, char **argv)
 	if (!readFile(argv[1], src, (size_t)W * H * 4)) { std::fprintf(stderr, "src read failed\n"); return 1; }
 	const bool hasDepth = std::string(argv[2]) != "-";
 	if (hasDepth && !readFile(argv[2], depth, (size_t)dw * dh)) { std::fprintf(stderr, "depth read failed\n"); return 1; }
+	/* キャラのマスクは 1 チャンネル → アルファに入れる (Subject Channel = Alpha と同じ) */
+	std::vector<float> subjectGray, subjectArgb;
+	if (!subjectFile.empty()) {
+		if (!readFile(subjectFile.c_str(), subjectGray, (size_t)W * H)) { std::fprintf(stderr, "subject read failed\n"); return 1; }
+		subjectArgb.resize((size_t)W * H * 4);
+		for (size_t n = 0; n < (size_t)W * H; ++n) {
+			const float m = subjectGray[n];
+			subjectArgb[n * 4 + 0] = m; subjectArgb[n * 4 + 1] = m; subjectArgb[n * 4 + 2] = m; subjectArgb[n * 4 + 3] = m;
+		}
+	}
 	std::vector<std::vector<float>> nbData;
 	for (const std::string &nf : nbFiles) {
 		nbData.emplace_back();
@@ -112,13 +127,15 @@ int main(int argc, char **argv)
 		DfImage srcImg = {(const unsigned char *)argb.data(), W, H, W * 16, DF_FMT_ARGB32F};
 		DfImage depthImg = {hasDepth ? (const unsigned char *)depth.data() : NULL, dw, dh, dw * 4, DF_FMT_GRAY32F};
 		DfAuxMap map = dfMakeAuxMap(depthImg, (float)dw, (float)dh, 0.f, 0.f, (float)W, (float)H);
+		DfImage subjImg = {subjectArgb.empty() ? NULL : (const unsigned char *)subjectArgb.data(), W, H, W * 16, DF_FMT_ARGB32F};
+		DfAuxMap smap = dfMakeAuxMap(subjImg, (float)W, (float)H, 0.f, 0.f, (float)W, (float)H);
 		DfImage nb[4];
 		int nbN = 0;
 		for (auto &d : nbData) if (nbN < 4) nb[nbN++] = {(const unsigned char *)d.data(), dw, dh, dw * 4, DF_FMT_GRAY32F};
 		for (int r = 0; r < repeat; ++r) {
 			DofContext c = ctx;
 			const auto t0 = std::chrono::steady_clock::now();
-			focus = RenderFrameCPU(c, srcImg, map, nb, nbN, out);
+			focus = RenderFrameCPU(c, srcImg, map, smap, nb, nbN, out);
 			ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 		}
 	} else {
@@ -129,7 +146,12 @@ int main(int argc, char **argv)
 			bgra[n * 4 + 0] = argb[n * 4 + 3]; bgra[n * 4 + 1] = argb[n * 4 + 2];
 			bgra[n * 4 + 2] = argb[n * 4 + 1]; bgra[n * 4 + 3] = argb[n * 4 + 0];
 		}
-		float *dSrc = NULL, *dDst = NULL, *dDepth = NULL;
+		float *dSrc = NULL, *dDst = NULL, *dDepth = NULL, *dSubj = NULL;
+		if (!subjectArgb.empty()) {
+			/* ARGB → BGRA (どれも同じ値なので並びはそのまま) */
+			cudaMalloc(&dSubj, subjectArgb.size() * 4);
+			cudaMemcpy(dSubj, subjectArgb.data(), subjectArgb.size() * 4, cudaMemcpyHostToDevice);
+		}
 		std::vector<float *> dNb;
 		cudaMalloc(&dSrc, bgra.size() * 4);
 		cudaMalloc(&dDst, bgra.size() * 4);
@@ -150,6 +172,8 @@ int main(int argc, char **argv)
 			f.ctx = ctx;
 			DfImage depthImg = {hasDepth ? (const unsigned char *)dDepth : NULL, dw, dh, dw * 4, DF_FMT_GRAY32F};
 			f.depthMap = dfMakeAuxMap(depthImg, (float)dw, (float)dh, 0.f, 0.f, (float)W, (float)H);
+			DfImage subjImg = {dSubj ? (const unsigned char *)dSubj : NULL, W, H, W * 16, DF_FMT_BGRA32F};
+			f.subjectMap = dfMakeAuxMap(subjImg, (float)W, (float)H, 0.f, 0.f, (float)W, (float)H);
 			f.src = {(const unsigned char *)dSrc, W, H, W * 16, DF_FMT_BGRA32F};
 			f.dst = dDst;
 			f.dstRowbytes = W * 16;

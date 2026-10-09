@@ -120,11 +120,19 @@ __global__ void kExpand(const float *in, float *out, int W, int H, int rad, bool
 	out[(size_t)y * W + x] = dfExpand1D(in, W, H, rad, horizontal, x, y);
 }
 
+__global__ void kSubject(DofContext c, DfAuxMap map, float *subject)
+{
+	DF_XY(c.outW, c.outH);
+	subject[(size_t)y * c.outW + x] = dfSubjectAt(map, c.p.subjectChannel, x, y);
+}
+
 __global__ void kCoc(DofContext c, const float *depth, float *coc)
 {
 	DF_XY(c.outW, c.outH);
 	const size_t n = (size_t)y * c.outW + x;
-	coc[n] = dfCoc(&c, depth[n]);
+	float r = dfCoc(&c, depth[n]);
+	if (c.subject) r *= 1.f - dfSat(c.subject[n] * c.p.subjectAmount);
+	coc[n] = r;
 }
 
 __global__ void kTileMax(DofContext c, float *tileMax)
@@ -199,8 +207,9 @@ int DofGPU_Render(DfGpuFrame &f, char *err, int errLen)
 	c.lutDec = DeviceLut();
 	if (!c.lutDec) { if (err) snprintf(err, errLen, "LUT alloc failed"); return -1; }
 	c.lutEnc = c.lutDec + DF_LUT_SIZE;
-	c.depth = c.coc = c.tileR = NULL;
+	c.depth = c.coc = c.tileR = c.subject = NULL;
 	dfSetupFrame(c, c.p.focusDepth);
+	const bool hasSubject = f.subjectMap.img.data != NULL && c.p.subjectAmount > 0.f;
 
 	const bool hasDepth = f.depthMap.img.data != NULL;
 	const int dw = f.depthMap.img.width, dh = f.depthMap.img.height;
@@ -211,6 +220,7 @@ int DofGPU_Render(DfGpuFrame &f, char *err, int errLen)
 	for (int k = 0; k < DF_LEVELS; ++k) count((size_t)c.lw[k] * c.lh[k] * 4);
 	if (hasDepth) {
 		count((size_t)dw * dh); count(NP); count(NP); count(NP);
+		if (hasSubject) count(NP);
 		count((size_t)c.tilesX * c.tilesY); count((size_t)c.tilesX * c.tilesY);
 	}
 	block = AcquireBlock(floats * sizeof(float));
@@ -252,6 +262,11 @@ int DofGPU_Render(DfGpuFrame &f, char *err, int errLen)
 			kExpand<<<Grid2(W, H), BLOCK2>>>(depth, tmp, W, H, rad, true);
 			kExpand<<<Grid2(W, H), BLOCK2>>>(tmp, coc, W, H, rad, false);   /* coc を作業に使う */
 			cudaMemcpy(depth, coc, sizeof(float) * NP, cudaMemcpyDeviceToDevice);
+		}
+		if (hasSubject) {
+			float *subject = cv.take(NP);
+			kSubject<<<Grid2(W, H), BLOCK2>>>(c, f.subjectMap, subject);
+			c.subject = subject;
 		}
 		kCoc<<<Grid2(W, H), BLOCK2>>>(c, depth, coc);
 		DF_CHECK("coc");
