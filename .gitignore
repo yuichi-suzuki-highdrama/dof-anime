@@ -1,0 +1,13 @@
+# ビルド成果物
+plugin/build/
+tools/harness/build/
+*.aex
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+# 一時
+*.log
+__pycache__/
+.claude/
