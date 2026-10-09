@@ -12,3 +12,4 @@ tools/harness/build/
 __pycache__/
 .claude/
 dof_first_test.png
+dof_subject_test.png
