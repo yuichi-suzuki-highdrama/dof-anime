@@ -30,12 +30,13 @@
 #endif
 #include <windows.h>
 
-static_assert(DOF_OUTFLAGS == (PF_OutFlag_DEEP_COLOR_AWARE | PF_OutFlag_CUSTOM_UI | PF_OutFlag_SEND_UPDATE_PARAMS_UI),
+static_assert(DOF_OUTFLAGS == (PF_OutFlag_DEEP_COLOR_AWARE | PF_OutFlag_CUSTOM_UI | PF_OutFlag_SEND_UPDATE_PARAMS_UI | PF_OutFlag_WIDE_TIME_INPUT),
 	"DofAE_Flags.h の DOF_OUTFLAGS を GlobalSetup のフラグと一致させること");
 static_assert(DOF_OUTFLAGS2 == (PF_OutFlag2_FLOAT_COLOR_AWARE |
                                 PF_OutFlag2_SUPPORTS_SMART_RENDER |
                                 PF_OutFlag2_SUPPORTS_THREADED_RENDERING |
-                                PF_OutFlag2_SUPPORTS_GPU_RENDER_F32),
+                                PF_OutFlag2_SUPPORTS_GPU_RENDER_F32 |
+                                PF_OutFlag2_AUTOMATIC_WIDE_TIME_INPUT),
 	"DofAE_Flags.h の DOF_OUTFLAGS2 を GlobalSetup のフラグと一致させること");
 
 /* 既定値 */

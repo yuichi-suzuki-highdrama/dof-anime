@@ -22,10 +22,13 @@
 #define DOF_PIPL_VERSION  524289
 
 /* PF_OutFlag_DEEP_COLOR_AWARE | PF_OutFlag_CUSTOM_UI (コンポビューのピントの目印)
-   | PF_OutFlag_SEND_UPDATE_PARAMS_UI (Focus Mode で使わない項目を灰色にする) */
-#define DOF_OUTFLAGS      0x06008000
+   | PF_OutFlag_SEND_UPDATE_PARAMS_UI (Focus Mode で使わない項目を灰色にする)
+   | PF_OutFlag_WIDE_TIME_INPUT (ピント送りで前後のコマの Focus Point を見る) */
+#define DOF_OUTFLAGS      0x06008002
 /* PF_OutFlag2_FLOAT_COLOR_AWARE | PF_OutFlag2_SUPPORTS_SMART_RENDER | PF_OutFlag2_SUPPORTS_THREADED_RENDERING
-   | PF_OutFlag2_SUPPORTS_GPU_RENDER_F32 (GPU 版。実際に使うかは PF_Cmd_GPU_DEVICE_SETUP で CUDA のときだけ返す) */
-#define DOF_OUTFLAGS2     0x0A001400
+   | PF_OutFlag2_SUPPORTS_GPU_RENDER_F32 (GPU 版。実際に使うかは PF_Cmd_GPU_DEVICE_SETUP で CUDA のときだけ返す)
+   | PF_OutFlag2_AUTOMATIC_WIDE_TIME_INPUT (前後のコマの値の読み出しを AE に覚えさせる。無いと、Focus Point が
+     止まっている間は AE が 1 コマの結果を使い回し、ピント送りがならされない) */
+#define DOF_OUTFLAGS2     0x0A021400
 
 #endif

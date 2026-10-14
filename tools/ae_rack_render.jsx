@@ -4,7 +4,7 @@
  *   AfterFX.exe -r C:\dev\DepthOfFieldAEPlugin\tools\ae_rack_render.jsx
  *
  * ae_rack_setup.jsx のあと、深度とキャラのマスクが結線されてから実行する。
- *   0〜2 秒: 前のキャラにピント → 2 秒でパッと後ろのキャラへ (停止したキーフレーム)
+ *   0〜2 秒: 前のキャラにピント → 2 秒で後ろのキャラへ (停止したキーフレーム。Focus Pull Time の分だけかけて移る)
  *   4〜5 秒: なめらかに前のキャラへ戻す (イージーイーズ) → 6 秒まで
  * 書き出し先は環境変数 DOF_RACK_OUT、無ければ下の OUT_MP4。プロジェクトは保存しない。
  */
@@ -31,6 +31,7 @@
         log("Depth Layer = " + fx.property("Depth Layer").value + ", Subject Layer = " + fx.property("Subject Layer").value +
             ", Subject Channel = " + fx.property("Subject Channel").value);
         fx.property("Blur Size").setValue(35);
+        fx.property("Focus Pull Time").setValue(0.8);   /* 映画のフォーカス送りのように 0.8 秒かけて移す */
 
         var fp = fx.property("Focus Point");
         while (fp.numKeys > 0) fp.removeKey(1);
