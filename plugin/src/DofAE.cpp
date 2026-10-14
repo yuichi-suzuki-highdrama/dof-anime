@@ -49,6 +49,7 @@ static const float DEF_BLUR_SIZE       = 30.f;
 static const float DEF_EDGE_EXPAND     = 2.f;
 static const float DEF_EDGE_BIAS       = 1.5f;
 static const float DEF_EDGE_SOFTEN     = 2.f;
+static const float DEF_SUBJECT_INSET   = 12.f;   /* マスクを使うときは、縁を深度で決める */
 static const float DEF_HIGHLIGHTS      = 1.f;
 static const float DEF_HIGHLIGHT_THR   = 0.75f;
 
@@ -223,6 +224,15 @@ static float RenderFrameCPU(DofContext &c, const DfImage &src, const DfAuxMap &d
 					dfSubjectWeights(&c, o, subject[n], subjectTgt[n]);
 				}
 			});
+			/* Subject Inset: マスクを内側へ縮めてなだらかにする (縁は深度だけで決まる)。tmp を作業に使う */
+			if (c.inset >= 0.5f) {
+				const int r = dfRound(c.inset);
+				parallelRows(H, [&](A_long y) { for (int x = 0; x < W; ++x) tmp[(size_t)y * W + x] = dfErode1D(subject.data(), W, H, r, true, x, (int)y); });
+				parallelRows(H, [&](A_long y) { for (int x = 0; x < W; ++x) subject[(size_t)y * W + x] = dfErode1D(tmp.data(), W, H, r, false, x, (int)y); });
+				const float sg = dfMax(0.5f, c.inset * DF_INSET_FEATHER);
+				parallelRows(H, [&](A_long y) { for (int x = 0; x < W; ++x) tmp[(size_t)y * W + x] = dfSoften1D(subject.data(), true, W, H, sg, true, x, (int)y); });
+				parallelRows(H, [&](A_long y) { for (int x = 0; x < W; ++x) subject[(size_t)y * W + x] = dfSoften1D(tmp.data(), true, W, H, sg, false, x, (int)y); });
+			}
 			c.subject = subject.data();
 			c.subjectTgt = subjectTgt.data();
 		}
@@ -258,21 +268,23 @@ static float RenderFrameCPU(DofContext &c, const DfImage &src, const DfAuxMap &d
 		const int step = dfRound(c.step);
 		if (step > 0) {
 			std::vector<float> wm, ts;
-			if (c.subject) { wm.resize(NP); ts.resize(NP); }
+			/* Subject Inset のときは縁を深度だけで決める (縮めたマスクの縁を人物の境目とみなさない) */
+			const float *stepSubject = c.inset >= 0.5f ? NULL : c.subject;
+			if (stepSubject) { wm.resize(NP); ts.resize(NP); }
 			parallelRows(H, [&](A_long y) {
 				for (int x = 0; x < W; ++x) {
 					const size_t n = (size_t)y * W + x;
 					float w, t;
-					dfMinMax1D(depth.data(), depth.data(), c.subject, c.subjectTgt, W, H, step, true, x, (int)y, tmp[n], coc[n], w, t);
-					if (c.subject) { wm[n] = w; ts[n] = t; }
+					dfMinMax1D(depth.data(), depth.data(), stepSubject, c.subjectTgt, W, H, step, true, x, (int)y, tmp[n], coc[n], w, t);
+					if (stepSubject) { wm[n] = w; ts[n] = t; }
 				}
 			});
 			parallelRows(H, [&](A_long y) {
 				for (int x = 0; x < W; ++x) {
 					float mn, mx, w, t;
-					dfMinMax1D(tmp.data(), coc.data(), c.subject ? wm.data() : NULL, c.subject ? ts.data() : NULL, W, H, step, false, x, (int)y, mn, mx, w, t);
+					dfMinMax1D(tmp.data(), coc.data(), stepSubject ? wm.data() : NULL, stepSubject ? ts.data() : NULL, W, H, step, false, x, (int)y, mn, mx, w, t);
 					const size_t n = (size_t)y * W + x;
-					depth[n] = dfStepDepth(depth[n], mn, mx, c.subject ? c.subject[n] : 0.f, w, t, c.focus);
+					depth[n] = dfStepDepth(depth[n], mn, mx, stepSubject ? stepSubject[n] : 0.f, w, t, c.focus);
 				}
 			});
 		}
@@ -456,6 +468,12 @@ static PF_Err ParamsSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef 
 	PF_ADD_FLOAT_SLIDERX("Subject Flatten", 0.f, 100.f, 0.f, 100.f, 100.f,
 		PF_Precision_INTEGER, PF_ValueDisplayFlag_PERCENT, 0, ID_SUBJECT_FLATTEN);
 
+	/* Subject Inset: マスクをこの幅だけ内側へ縮めて使う。マスクは人物の内側 (顔や服の中の深度のむら) を整えるだけになり、
+	   人物の縁は深度だけで決まる (マスクの縁のガタガタや、髪の間の埋まりが出ない) */
+	AEFX_CLR_STRUCT(def);
+	PF_ADD_FLOAT_SLIDERX("Subject Inset", 0.f, 80.f, 0.f, 40.f, DEF_SUBJECT_INSET,
+		PF_Precision_TENTHS, PF_ValueDisplayFlag_PIXEL, 0, ID_SUBJECT_INSET);
+
 	/* ピントに関係なく、マスクの中を必ずくっきり残す (手前のぼけも重ねない) */
 	AEFX_CLR_STRUCT(def);
 	PF_ADD_FLOAT_SLIDERX("Keep Subject Sharp", 0.f, 100.f, 0.f, 100.f, 0.f,
@@ -530,10 +548,25 @@ static PF_Err ParamsSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef 
 	PF_ADD_TOPIC("Bokeh", ID_TOPIC_BOKEH);
 
 	AEFX_CLR_STRUCT(def);
-	PF_ADD_POPUP("Shape", 3, SHAPE_CIRCLE, "Circle|Hexagon|Octagon", ID_SHAPE);
+	PF_ADD_POPUP("Shape", 4, SHAPE_CIRCLE, "Circle|Hexagon|Octagon|Polygon", ID_SHAPE);
 
 	AEFX_CLR_STRUCT(def);
 	PF_ADD_ANGLE("Rotation", 0, ID_SHAPE_ROTATION);
+
+	/* レンズらしさ。Blades: Shape = Polygon の羽根の枚数。Roundness: 多角形と円の中間。Aspect: 玉の縦横比 (横 / 縦)。
+	   Cat Eye: 画面の端ほど玉が欠ける口径食。Bubble: 玉の縁を明るく (シャボン玉ボケ)。Fringe: 玉の縁の色ずれ */
+	AEFX_CLR_STRUCT(def);
+	PF_ADD_FLOAT_SLIDERX("Blades", 3.f, 10.f, 3.f, 10.f, 6.f, PF_Precision_INTEGER, PF_ValueDisplayFlag_NONE, 0, ID_BLADES);
+	AEFX_CLR_STRUCT(def);
+	PF_ADD_FLOAT_SLIDERX("Roundness", 0.f, 100.f, 0.f, 100.f, 0.f, PF_Precision_INTEGER, PF_ValueDisplayFlag_PERCENT, 0, ID_ROUNDNESS);
+	AEFX_CLR_STRUCT(def);
+	PF_ADD_FLOAT_SLIDERX("Aspect", 0.25f, 4.f, 0.5f, 2.f, 1.f, PF_Precision_HUNDREDTHS, PF_ValueDisplayFlag_NONE, 0, ID_ASPECT);
+	AEFX_CLR_STRUCT(def);
+	PF_ADD_FLOAT_SLIDERX("Cat Eye", 0.f, 100.f, 0.f, 100.f, 0.f, PF_Precision_INTEGER, PF_ValueDisplayFlag_PERCENT, 0, ID_CAT_EYE);
+	AEFX_CLR_STRUCT(def);
+	PF_ADD_FLOAT_SLIDERX("Bubble", 0.f, 100.f, 0.f, 100.f, 0.f, PF_Precision_INTEGER, PF_ValueDisplayFlag_PERCENT, 0, ID_BUBBLE);
+	AEFX_CLR_STRUCT(def);
+	PF_ADD_FLOAT_SLIDERX("Fringe", 0.f, 100.f, 0.f, 100.f, 0.f, PF_Precision_INTEGER, PF_ValueDisplayFlag_PERCENT, 0, ID_FRINGE);
 
 	/* 明るい所を玉ぼけにする強さと、玉ぼけにし始める明るさ */
 	AEFX_CLR_STRUCT(def);
@@ -794,6 +827,7 @@ static PF_Err ReadDofParams(PF_InData *in_data, DofParams &p)
 	p.subjectChannel = (int)r.popup(DOF_SUBJECT_CHANNEL, 1);
 	p.subjectAmount  = dfSat(r.fs(DOF_SUBJECT_AMOUNT, 0.f) / 100.f);
 	p.subjectFlatten = dfSat(r.fs(DOF_SUBJECT_FLATTEN, 100.f) / 100.f);
+	p.subjectInset   = dfMax(0.f, r.fs(DOF_SUBJECT_INSET, DEF_SUBJECT_INSET));
 	p.blurSize    = dfMax(0.f, r.fs(DOF_BLUR_SIZE, DEF_BLUR_SIZE));
 	p.nearScale   = dfMax(0.f, r.fs(DOF_NEAR_BLUR, 0.f));
 	p.farScale    = dfMax(0.f, r.fs(DOF_FAR_BLUR, 1.f));
@@ -802,6 +836,12 @@ static PF_Err ReadDofParams(PF_InData *in_data, DofParams &p)
 	p.edgeSoften  = dfMax(0.f, r.fs(DOF_EDGE_SOFTEN, DEF_EDGE_SOFTEN));
 	p.shape       = (int)r.popup(DOF_SHAPE, SHAPE_CIRCLE);
 	p.shapeRotation = r.angle(DOF_SHAPE_ROTATION, 0.f);
+	p.blades      = (int)(r.fs(DOF_BLADES, 6.f) + 0.5f);
+	p.roundness   = dfSat(r.fs(DOF_ROUNDNESS, 0.f) / 100.f);
+	p.aspect      = r.fs(DOF_ASPECT, 1.f);
+	p.catEye      = dfSat(r.fs(DOF_CAT_EYE, 0.f) / 100.f);
+	p.bubble      = dfSat(r.fs(DOF_BUBBLE, 0.f) / 100.f);
+	p.fringe      = dfSat(r.fs(DOF_FRINGE, 0.f) / 100.f);
 	p.highlights  = dfMax(0.f, r.fs(DOF_HIGHLIGHTS, DEF_HIGHLIGHTS));
 	p.highlightThreshold = dfSat(r.fs(DOF_HIGHLIGHT_THRESHOLD, DEF_HIGHLIGHT_THR));
 	p.quality     = (int)r.popup(DOF_QUALITY, QUALITY_NORMAL);

@@ -49,7 +49,8 @@ enum {
 enum {
 	SHAPE_CIRCLE = 1,
 	SHAPE_HEXAGON,
-	SHAPE_OCTAGON
+	SHAPE_OCTAGON,
+	SHAPE_POLYGON             /* 羽根の枚数 (Blades) を指定 */
 };
 
 enum {
@@ -86,6 +87,8 @@ struct DofParams {
 	float focusRange;         /* ピントの合う幅 (深度の差がこれ以下ならぼかさない) */
 	int   subjectChannel;     /* Subject Layer の読み方 1: アルファ  2: 明るさ  3: Multi (RGB。赤・緑・青 = 1・2・3 人目のキャラ) */
 	float subjectAmount;      /* Keep Subject Sharp: ピントに関係なく、マスクの中をどれだけくっきり残すか (0..1) */
+	float subjectInset;       /* Subject Inset: マスクを内側へ縮める幅 (1080p でのピクセル数)。縮めたマスクは人物の内側を整えるだけに使い、
+	                             縁は深度だけで決める (マスクの縁のガタガタが出ない) */
 	float subjectFlatten;     /* Subject Flatten: マスクの中の深度を人物の代表の深度にどれだけ寄せるか (0..1)。
 	                             1 なら人物を 1 枚の板として扱い、人物の中のぼけのむらが無くなる */
 	float blurSize;           /* 深度の差 0.5 のときのぼけの半径 (1080p でのピクセル数) */
@@ -96,6 +99,12 @@ struct DofParams {
 	float edgeSoften;         /* Edge Soften: くっきりした物の縁から内側へ、ぼけを少しずつ弱めていく幅 (1080p でのピクセル数) */
 	int   shape;
 	float shapeRotation;      /* 度 */
+	int   blades;             /* Shape = Polygon のときの羽根の枚数 (3〜10) */
+	float roundness;          /* 0..1: 多角形 → 円 */
+	float aspect;             /* 玉ボケの縦横比 (横 / 縦。1 = 丸) */
+	float catEye;             /* 0..1: 口径食 */
+	float bubble;             /* 0..1: 玉ボケの縁の明るさ */
+	float fringe;             /* 0..1: 玉ボケの縁の色ずれ */
 	float highlights;         /* 明るい所を玉ぼけにする強さ */
 	float highlightThreshold; /* 玉ぼけにし始める明るさ (0..1) */
 	int   quality;
@@ -116,6 +125,7 @@ struct DofParams {
 
 static constexpr int   DF_MAX_SUBJECTS    = 3;       /* キャラを別々に扱う人数 (マスクの赤・緑・青) */
 static constexpr int   DF_LEVELS          = 4;       /* 色の縮小の段 (1, 1/2, 1/4, 1/8) */
+static constexpr float DF_MIP_SPACING     = 0.75f;   /* 点の間隔がこの何倍 (2 の累乗) になったら 1 段縮小した画像から読むか。小さいほどつぶつぶが消え、ぼかしの中の模様もなめらかになる */
 static constexpr int   DF_TILE            = 16;      /* ぼけの最大値を求める区画の一辺 (画素) */
 static constexpr float DF_MAX_COC_1080    = 160.f;   /* ぼけの半径の上限 (1080p でのピクセル数) */
 static constexpr float DF_DEPTH_REF       = 0.5f;    /* Blur Size が指す深度の差 */
@@ -129,6 +139,7 @@ static constexpr float DF_STEP_MASK       = 0.5f;    /* キャラの縁とみな
 static constexpr float DF_FOCUS_WINDOW    = 0.012f;  /* Focus Point のまわりで深度を調べる範囲 (画面の高さに対する半径) */
 static constexpr int   DF_STABILIZE_MAX   = 2;       /* 前後何フレームまで */
 static constexpr float DF_SNAP_SIGMA      = 0.08f;   /* 深度を線画に合わせるとき、色の近さの幅 */
+static constexpr float DF_FRINGE_MAX = 0.08f;   /* Fringe 100% のときの、赤と青の半径の差 (緑に対する割合) */
 static constexpr float DF_GOLDEN_ANGLE    = 2.39996323f;
 
 /* 品質ごとの点の数 (ぼけが大きいとき) */
@@ -275,9 +286,14 @@ struct DofContext {
 	float step;               /* 深度の段差を締めるときに見るまわりの半径 (出力の画素) */
 	float bias;               /* Edge Bias (出力の画素) */
 	float soften;             /* Edge Soften (出力の画素) */
+	float inset;              /* Subject Inset (出力の画素) */
 	int   maxSamples;
 	int   polySides;          /* 0 = 円 */
 	float polyRot;            /* ラジアン */
+	float roundness, catEye, bubble, fringe;
+	float aspX, aspY, aspMax;  /* 点を置く円の縦横の倍率 (aspX * aspY = 1) と、その大きい方 */
+	float reachScale;          /* ぼけの半径に対して、実際に届く範囲の倍率 (Aspect と Fringe のぶん) */
+	float ceX, ceY, invHalfDiag;   /* 口径食: 出力の画素での画面の中心と、対角線の半分の逆数 */
 	int   tilesX, tilesY;
 	/* 作業領域 (出力の大きさ) */
 	const float *depth;       /* 深度 (近い = 1) */
@@ -305,8 +321,24 @@ inline void dfSetupFrame(DofContext &c, float focusDepth)
 	c.step       = DF_STEP_1080 * s;
 	c.bias       = dfMax(0.f, c.p.edgeBias) * s;
 	c.soften     = dfMax(0.f, c.p.edgeSoften) * s;
+	c.inset      = dfMax(0.f, c.p.subjectInset) * s;
 	c.maxSamples = dfMaxSamples(c.p.quality);
-	c.polySides  = c.p.shape == SHAPE_HEXAGON ? 6 : (c.p.shape == SHAPE_OCTAGON ? 8 : 0);
+	c.polySides  = c.p.shape == SHAPE_HEXAGON ? 6 : (c.p.shape == SHAPE_OCTAGON ? 8 :
+	               (c.p.shape == SHAPE_POLYGON ? dfClamp(c.p.blades, 3, 10) : 0));
+	c.roundness  = dfSat(c.p.roundness);
+	c.catEye     = dfSat(c.p.catEye);
+	c.bubble     = dfSat(c.p.bubble);
+	c.fringe     = dfSat(c.p.fringe);
+	{
+		const float a = dfClamp(c.p.aspect > 0.f ? c.p.aspect : 1.f, 0.25f, 4.f);
+		c.aspX = sqrtf(a);
+		c.aspY = 1.f / c.aspX;
+		c.aspMax = dfMax(c.aspX, c.aspY);
+	}
+	c.reachScale = c.aspMax * (1.f + c.fringe * DF_FRINGE_MAX);
+	c.ceX = c.layerW * 0.5f - c.originX;
+	c.ceY = c.layerH * 0.5f - c.originY;
+	c.invHalfDiag = 2.f / dfMax(1.f, sqrtf(c.layerW * c.layerW + c.layerH * c.layerH));
 	c.polyRot    = c.p.shapeRotation * 3.14159265f / 180.f;
 	c.tilesX     = (c.outW + DF_TILE - 1) / DF_TILE;
 	c.tilesY     = (c.outH + DF_TILE - 1) / DF_TILE;
@@ -576,6 +608,23 @@ DF_HD DF_INL float dfSubjectBlendDepth(const DofContext *c, float depth, float w
 	return dfMix(depth, tgt, dfSat(w * c->p.subjectFlatten));
 }
 
+/*
+ * Subject Inset: マスクを内側へ縮め (横と縦の最小。四角く縮む)、縮めた縁をなだらかにする (ガウス)。
+ * なだらかにする幅は縮める幅の DF_INSET_FEATHER 倍。縮めたマスクの縁は人物の縁より内側にあるので、ぼけの境目には現れない
+ */
+static constexpr float DF_INSET_FEATHER = 0.4f;
+
+DF_HD DF_INL float dfErode1D(const float *in, int W, int H, int rad, bool horizontal, int x, int y)
+{
+	float m = in[(size_t)y * W + x];
+	for (int i = -rad; i <= rad; ++i) {
+		const int xx = horizontal ? dfClamp(x + i, 0, W - 1) : x;
+		const int yy = horizontal ? y : dfClamp(y + i, 0, H - 1);
+		m = dfMin(m, in[(size_t)yy * W + xx]);
+	}
+	return m;
+}
+
 /* ピントの深度からの差 → 符号付きのぼけの半径 (出力の画素。手前 = 負) */
 DF_HD DF_INL float dfCoc(const DofContext *c, float depth)
 {
@@ -676,11 +725,11 @@ DF_HD DF_INL float dfTileMax(const DofContext *c, int tx, int ty)
 /* この区画の画素に届きうるぼけの最大の半径: 近くの区画のうち、ぼけがこの区画まで届くものの最大値 */
 DF_HD DF_INL float dfTileReach(const DofContext *c, const float *tileMax, int tx, int ty)
 {
-	const int k = (int)ceilf(c->maxCoc / (float)DF_TILE) + 1;
+	const int k = (int)ceilf(c->maxCoc * c->reachScale / (float)DF_TILE) + 1;
 	float r = tileMax[(size_t)ty * c->tilesX + tx];
 	for (int j = dfMax(0, ty - k); j <= dfMin(c->tilesY - 1, ty + k); ++j)
 		for (int i = dfMax(0, tx - k); i <= dfMin(c->tilesX - 1, tx + k); ++i) {
-			const float m = tileMax[(size_t)j * c->tilesX + i];
+			const float m = tileMax[(size_t)j * c->tilesX + i] * c->reachScale;   /* Aspect と Fringe のぶん遠くまで届く */
 			const int d = dfMax(dfMax(i - tx, tx - i), dfMax(j - ty, ty - j));
 			/* 区画の間の最短の距離 (画素) より大きなぼけなら届く */
 			if (m > (float)((d - 1) * DF_TILE)) r = dfMax(r, m);
@@ -699,7 +748,8 @@ DF_HD DF_INL float dfShapeScale(const DofContext *c, float ang)
 	const float seg = 6.28318531f / (float)c->polySides;
 	float a = ang - c->polyRot;
 	a = a - seg * floorf(a / seg) - 0.5f * seg;   /* 辺の中央からの角度 */
-	return cosf(0.5f * seg) / cosf(a);
+	/* Roundness: 多角形 (0) と円 (1) の間。内接円と外接円の間をつなぐので、円のときは面積が少し大きい */
+	return dfMix(cosf(0.5f * seg) / cosf(a), 1.f, c->roundness);
 }
 
 /* リニアの色を読む (出力の大きさの画像の 1 画素) */
@@ -743,6 +793,41 @@ DF_HD DF_INL float dfHighlight(const DofContext *c, float lum)
  *   R: この画素に届きうるぼけの最大の半径 (区画ごとの値)
  * 点は黄金角のらせん (Vogel の円盤) で R の円の中に等しい面積ずつ並べる。
  */
+/*
+ * レンズらしさ (Lens)。After Effects の Camera Lens Blur などにある項目を、集めるときの重みで作る。
+ *   Blades / Roundness: 絞りの羽根の枚数と、多角形と円の中間 (dfShapeScale)
+ *   Aspect:   縦横比 (点を置く円を楕円にする。面積は変えない)
+ *   Cat Eye:  口径食。画面の端ほど玉ボケが、中心から外への向きにずらした円で切られて欠ける
+ *   Bubble:   玉ボケの縁を明るくする (シャボン玉ボケ。明るさの合計は変えない)
+ *   Fringe:   赤・緑・青で玉の半径を少しずつ変え、縁に色ずれを付ける
+ */
+
+/* q の絞り (半径 rad、形と口径食つき) が p を覆う割合 × 面積の重み を色ごとに w3 に入れる。覆わなければ false。
+   r, (cs, sn): p から q への距離と向き (絞りの座標)。aq: q のぼけの半径 (面積の重み用)。(ceX, ceY): 口径食のずらし (aq を掛ける前) */
+DF_HD DF_INL bool dfLensCover(const DofContext *c, float rad, float aq, float r, float cs, float sn, float ceX, float ceY,
+                             const float chScale[3], float w3[3])
+{
+	bool any = false;
+	for (int k = 0; k < 3; ++k) {
+		const float rk = rad * chScale[k];
+		float cov = dfSat(rk - r + 0.5f);
+		if (cov > 0.f && (ceX != 0.f || ceY != 0.f)) {
+			/* q から p への位置 (-r cs, -r sn) が、ずらした円 (中心 (ceX, ceY)*rk、半径 rk) の中か */
+			const float dx = -r * cs - ceX * rk, dy = -r * sn - ceY * rk;
+			cov = dfMin(cov, dfSat(rk - sqrtf(dx * dx + dy * dy) + 0.5f));
+		}
+		if (cov > 0.f && c->bubble > 0.f) {
+			/* 縁ほど明るく: t^4 の面積の平均は 1/3 なので、それを引いて合計を変えない */
+			const float t = dfSat(r / dfMax(rk, 0.5f));
+			cov *= dfMax(0.05f, 1.f + 3.f * c->bubble * (t * t * t * t - 0.3333f));
+		}
+		const float a = aq * chScale[k];
+		w3[k] = cov / dfMax(a * a, 0.25f);
+		any = any || cov > 0.f;
+	}
+	return any;
+}
+
 DF_HD DF_INL void dfGather(const DofContext *c, int x, int y, float R, float *out)
 {
 	const int W = c->outW, H = c->outH;
@@ -753,77 +838,93 @@ DF_HD DF_INL void dfGather(const DofContext *c, int x, int y, float R, float *ou
 	dfFetch(c, 0, x, y, center);
 	if (R < 0.5f) { out[0] = center[0]; out[1] = center[1]; out[2] = center[2]; out[3] = center[3]; return; }
 
+	/* 色にじみ (Fringe): 赤・緑・青で玉の半径を少しずつ変える。点を置く円は、いちばん大きい赤まで広げる */
+	const float fr = c->fringe * DF_FRINGE_MAX;
+	const float chScale[3] = {1.f + fr, 1.f, 1.f - fr};
+	const float Rn = R * (1.f + fr);
 	/* 点の数: 小さいぼけは少なく (円の面積に合わせる) */
-	const int n = dfClamp((int)ceilf(R * R * 0.8f), 8, c->maxSamples);
+	const int n = dfClamp((int)ceilf(Rn * Rn * 0.8f), 8, c->maxSamples);
 	/* 点の間隔が広いときは縮小した画像から読む (細かい模様のちらつきを抑える) */
-	const float spacing = R * sqrtf(3.14159265f / (float)n);
-	const int level = dfClamp((int)floorf(log2f(dfMax(spacing, 1.f) / 1.5f)), 0, DF_LEVELS - 1);
+	const float spacing = Rn * c->aspMax * sqrtf(3.14159265f / (float)n);
+	const int level = dfClamp((int)floorf(log2f(dfMax(spacing, 1.f) / DF_MIP_SPACING)), 0, DF_LEVELS - 1);
 	const bool pNear = cp < 0.f;
 
-	/* 後ろの層 (ピントと奥)。自分の画素から始める (手前の画素なら、後ろの層には入れない) */
-	float bg[4] = {0.f, 0.f, 0.f, 0.f}, bgW = 0.f;
+	/* 後ろの層 (ピントと奥)。自分の画素から始める (手前の画素なら、後ろの層には入れない)。重みは色ごと */
+	float bg[4] = {0.f, 0.f, 0.f, 0.f}, bgW[3] = {0.f, 0.f, 0.f};
 	if (!pNear) {
 		const float w = 1.f / dfMax(ap * ap, 0.25f);
 		for (int k = 0; k < 4; ++k) bg[k] = center[k] * w;
-		bgW = w;
+		for (int k = 0; k < 3; ++k) bgW[k] = w;
 	}
-	/* 前の層 (手前のぼけ) と、その覆う割合 */
-	float fg[4] = {0.f, 0.f, 0.f, 0.f}, fgW = 0.f, cover = 0.f;
-	const float area = R * R / (float)n;   /* 1 点が受け持つ面積 / π */
+	/* 前の層 (手前のぼけ) と、その覆う割合 (緑で数える) */
+	float fg[4] = {0.f, 0.f, 0.f, 0.f}, fgW[3] = {0.f, 0.f, 0.f}, cover = 0.f;
+	const float area = Rn * Rn / (float)n;   /* 1 点が受け持つ面積 / π */
 	if (pNear) {
 		const float d = area / dfMax(ap * ap, 0.25f);
 		const float hl = dfHighlight(c, (0.2126f * center[0] + 0.7152f * center[1] + 0.0722f * center[2]) / dfMax(center[3], 1e-4f));
 		for (int k = 0; k < 4; ++k) fg[k] = center[k] * d * hl;
-		fgW = d * hl;
+		for (int k = 0; k < 3; ++k) fgW[k] = d * hl;
 		cover = d;
 	}
 
 	for (int i = 0; i < n; ++i) {
-		const float r = R * sqrtf(((float)i + 0.5f) / (float)n);
+		const float r = Rn * sqrtf(((float)i + 0.5f) / (float)n);   /* 絞りの座標での距離 (縦横比をかける前) */
 		const float th = (float)i * DF_GOLDEN_ANGLE;
-		const float ox = r * cosf(th), oy = r * sinf(th);
+		const float cs = cosf(th), sn = sinf(th);
+		const float ox = r * cs * c->aspX, oy = r * sn * c->aspY;   /* 画面の上の位置 (Aspect で楕円に) */
 		const int qx = dfClamp(x + dfRound(ox), 0, W - 1);
 		const int qy = dfClamp(y + dfRound(oy), 0, H - 1);
 		const float cq = c->coc[(size_t)qy * W + qx];
 		const float aq = fabsf(cq);
-		/* q の円が p に届くか: q から p への向き (th + π) での絞りの形 */
+		/* q の絞りが p に届くか: q から p への向き (th + π) での絞りの形 */
 		const float shape = dfShapeScale(c, th + 3.14159265f);
+		/* 口径食 (Cat Eye): q の絞りを、画面の中心から q への向きにずらした円で切る (端ほど強く) */
+		float ceX = 0.f, ceY = 0.f;
+		if (c->catEye > 0.f) {
+			ceX = c->catEye * ((float)qx - c->ceX) * c->invHalfDiag;
+			ceY = c->catEye * ((float)qy - c->ceY) * c->invHalfDiag;
+		}
 		float col[4];
 		bool fetched = false;
 		if (cq < 0.f) {
 			/* 手前の点: 後ろの物の上に広がる */
-			const float cov = dfSat(aq * shape - r + 0.5f);
-			if (cov <= 0.f) continue;
-			dfFetchLevel(c, level, (float)x + ox, (float)y + oy, col);
-			fetched = true;
-			const float d = cov * area / dfMax(aq * aq, 0.25f);
-			const float hl = dfHighlight(c, (0.2126f * col[0] + 0.7152f * col[1] + 0.0722f * col[2]) / dfMax(col[3], 1e-4f));
-			for (int k = 0; k < 4; ++k) fg[k] += col[k] * d * hl;
-			fgW += d * hl;
-			cover += d;
+			float w3[3];
+			if (!dfLensCover(c, aq * shape, aq, r, cs, sn, ceX, ceY, chScale, w3)) { if (!pNear) continue; }
+			else {
+				dfFetchLevel(c, level, (float)x + ox, (float)y + oy, col);
+				fetched = true;
+				const float hl = dfHighlight(c, (0.2126f * col[0] + 0.7152f * col[1] + 0.0722f * col[2]) / dfMax(col[3], 1e-4f));
+				for (int k = 0; k < 3; ++k) { fg[k] += col[k] * w3[k] * area * hl; fgW[k] += w3[k] * area * hl; }
+				fg[3] += col[3] * w3[1] * area * hl;
+				cover += w3[1] * area;
+			}
 			/* p も手前なら、手前どうしは後ろの層にも入れる (手前の物の内側をなめらかにする) */
 			if (!pNear) continue;
 		}
 		/* 後ろの層: q が p より奥なら、q の広がりを p のぼけまでに抑える (ピントの合った物に背景がにじまない) */
 		float reach = aq * shape;
 		if (!pNear && cq > cp) reach = dfMin(reach, ap * shape);
-		const float cov = dfSat(reach - r + 0.5f);
-		if (cov <= 0.f) continue;
+		float w3[3];
+		if (!dfLensCover(c, reach, aq, r, cs, sn, ceX, ceY, chScale, w3)) continue;
 		if (!fetched) dfFetchLevel(c, level, (float)x + ox, (float)y + oy, col);
-		const float w = cov / dfMax(aq * aq, 0.25f);
 		const float hl = dfHighlight(c, (0.2126f * col[0] + 0.7152f * col[1] + 0.0722f * col[2]) / dfMax(col[3], 1e-4f));
-		for (int k = 0; k < 4; ++k) bg[k] += col[k] * w * hl;
-		bgW += w * hl;
+		for (int k = 0; k < 3; ++k) { bg[k] += col[k] * w3[k] * hl; bgW[k] += w3[k] * hl; }
+		bg[3] += col[3] * w3[1] * hl;
 	}
 
 	float back[4];
-	if (bgW > 1e-8f) for (int k = 0; k < 4; ++k) back[k] = bg[k] / bgW;
-	else for (int k = 0; k < 4; ++k) back[k] = center[k];
+	for (int k = 0; k < 4; ++k) {
+		const float wk = bgW[k < 3 ? k : 1];
+		back[k] = wk > 1e-8f ? bg[k] / wk : center[k];
+	}
 	/* キャラの上には手前のぼけを重ねない (キャラはいちばん上のセルとして扱う) */
 	const float keep = c->subject ? dfSat(c->subject[np] * c->p.subjectAmount) : 0.f;
 	const float alpha = dfSat(cover) * (1.f - keep);
-	if (fgW > 1e-8f && alpha > 0.f) {
-		for (int k = 0; k < 4; ++k) out[k] = dfMix(back[k], fg[k] / fgW, alpha);
+	if (fgW[1] > 1e-8f && alpha > 0.f) {
+		for (int k = 0; k < 4; ++k) {
+			const float wk = fgW[k < 3 ? k : 1];
+			out[k] = dfMix(back[k], wk > 1e-8f ? fg[k] / wk : back[k], alpha);
+		}
 	} else {
 		for (int k = 0; k < 4; ++k) out[k] = back[k];
 	}
@@ -919,9 +1020,22 @@ inline float dfResolveFocus(DofContext &c, const float *low, const float *mask, 
 {
 	for (int s = 0; s < DF_MAX_SUBJECTS; ++s) c.subjectDepth[s] = mask ? dfSubjectMedian(low, mask, dw, dh, s) : -1.f;
 	if (c.p.focusMode != FOCUS_POINT) return c.p.focusDepth;
+	/* Subject Inset のとき: マスクの外側の縁の帯は元の深度のまま残るので、ピントは点のまわりの元の深度で決め、
+	   点が乗っているキャラの寄せる先もその深度にする (中央値だと、縁の帯とキャラの内側でピントがずれる) */
+	const bool rawFocus = mask && c.inset >= 0.5f;
+	if (rawFocus) {
+		float sum[DF_MAX_SUBJECTS] = {}, cnt[DF_MAX_SUBJECTS] = {};
+		auto add = [&](float lx, float ly) {
+			const int s = dfPointSubject(mask, dw, dh, sx, sy, lx, ly);
+			if (s >= 0 && c.subjectDepth[s] >= 0.f) { sum[s] += dfFocusFromPoint(low, dw, dh, sx, sy, lx, ly); cnt[s] += 1.f; }
+		};
+		add(c.p.focusX, c.p.focusY);
+		for (int i = 0; i < c.p.pullCount && i < DF_PULL_MAX; ++i) { add(c.p.pull[i].ax, c.p.pull[i].ay); add(c.p.pull[i].bx, c.p.pull[i].by); }
+		for (int s = 0; s < DF_MAX_SUBJECTS; ++s) if (cnt[s] > 0.f) c.subjectDepth[s] = sum[s] / cnt[s];
+	}
 	/* 点 (lx, ly) のピントの深度: キャラの上ならそのキャラの代表の深度 (キャラ全体にピントが合う)、そうでなければ点のまわりの深度 */
 	auto at = [&](float lx, float ly) {
-		if (mask) {
+		if (mask && !rawFocus) {
 			const int s = dfPointSubject(mask, dw, dh, sx, sy, lx, ly);
 			if (s >= 0 && c.subjectDepth[s] >= 0.f) return c.subjectDepth[s];
 		}

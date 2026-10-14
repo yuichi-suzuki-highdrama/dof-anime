@@ -131,6 +131,20 @@ __global__ void kSubject(DofContext c, DfAuxMap map, float *subject, float *tgtO
 	tgtOut[n] = tgt;
 }
 
+/* Subject Inset: 縮める (横 → 縦) */
+__global__ void kErode(const float *in, float *out, int W, int H, int rad, bool horizontal)
+{
+	DF_XY(W, H);
+	out[(size_t)y * W + x] = dfErode1D(in, W, H, rad, horizontal, x, y);
+}
+
+/* Subject Inset: なだらかにする (横 → 縦)。マスクは 0 以上なので Edge Soften の関数をそのまま使う */
+__global__ void kFeather(const float *in, float *out, int W, int H, float sigma, bool horizontal)
+{
+	DF_XY(W, H);
+	out[(size_t)y * W + x] = dfSoften1D(in, true, W, H, sigma, horizontal, x, y);
+}
+
 __global__ void kSubjectLow(DfAuxMap depthMap, DfAuxMap map, int channel, int dw, int dh, float *mask)
 {
 	DF_XY(dw, dh);
@@ -299,7 +313,7 @@ int DofGPU_Render(DfGpuFrame &f, char *err, int errLen)
 	if (hasDepth) {
 		count((size_t)dw * dh); count(NP); count(NP); count(NP);
 		if (f.sharpMap.img.data || f.blurMap.img.data) { count(NP); count(NP); }
-		if (hasSubject) { count(NP); count(NP); count(NP); count(NP); count((size_t)dw * dh * 3); }
+		if (hasSubject) { count(NP); count(NP); count(NP); count(NP); count((size_t)dw * dh * 3); if (c.inset >= 0.5f) count(NP); }
 		count((size_t)c.tilesX * c.tilesY); count((size_t)c.tilesX * c.tilesY);
 		if (c.p.edgeBias > 0.f || c.p.edgeSoften > 0.f) count(NP);
 	}
@@ -359,6 +373,17 @@ int DofGPU_Render(DfGpuFrame &f, char *err, int errLen)
 		if (hasSubject) {
 			float *subject = cv.take(NP), *tgt = cv.take(NP);
 			kSubject<<<Grid2(W, H), BLOCK2>>>(c, f.subjectMap, subject, tgt);
+			/* Subject Inset: マスクを内側へ縮めてなだらかにする (縁は深度だけで決まる) */
+			if (c.inset >= 0.5f) {
+				float *work = cv.take(NP);
+				const int r = dfRound(c.inset);
+				kErode<<<Grid2(W, H), BLOCK2>>>(subject, work, W, H, r, true);
+				kErode<<<Grid2(W, H), BLOCK2>>>(work, subject, W, H, r, false);
+				const float sg = dfMax(0.5f, c.inset * DF_INSET_FEATHER);
+				kFeather<<<Grid2(W, H), BLOCK2>>>(subject, work, W, H, sg, true);
+				kFeather<<<Grid2(W, H), BLOCK2>>>(work, subject, W, H, sg, false);
+				DF_CHECK("inset");
+			}
 			c.subject = subject;
 			c.subjectTgt = tgt;
 			kBlend<<<Grid2(W, H), BLOCK2>>>(c, depth);
@@ -381,9 +406,11 @@ int DofGPU_Render(DfGpuFrame &f, char *err, int errLen)
 		const int step = dfRound(c.step);
 		if (step > 0) {
 			float *wm = NULL, *ts = NULL;
-			if (c.subject) { wm = cv.take(NP); ts = cv.take(NP); }
-			kMinMaxH<<<Grid2(W, H), BLOCK2>>>(depth, c.subject, c.subjectTgt, tmp, coc, wm, ts, W, H, step);   /* coc を作業に使う */
-			kStepV<<<Grid2(W, H), BLOCK2>>>(tmp, coc, wm, ts, c.subject, depth, W, H, step, c.focus);
+			/* Subject Inset のときは縁を深度だけで決める (縮めたマスクの縁を人物の境目とみなさない) */
+			const float *stepSubject = c.inset >= 0.5f ? NULL : c.subject;
+			if (stepSubject) { wm = cv.take(NP); ts = cv.take(NP); }
+			kMinMaxH<<<Grid2(W, H), BLOCK2>>>(depth, stepSubject, c.subjectTgt, tmp, coc, wm, ts, W, H, step);   /* coc を作業に使う */
+			kStepV<<<Grid2(W, H), BLOCK2>>>(tmp, coc, wm, ts, stepSubject, depth, W, H, step, c.focus);
 		}
 		kCoc<<<Grid2(W, H), BLOCK2>>>(c, depth, sharpB, coc);
 		DF_CHECK("coc");

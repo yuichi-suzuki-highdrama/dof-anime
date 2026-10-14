@@ -45,7 +45,7 @@ int main(int argc, char **argv)
 	p.focusX = W * 0.5f; p.focusY = H * 0.45f;
 	p.focusDepth = DEF_FOCUS_DEPTH; p.focusRange = DEF_FOCUS_RANGE;
 	p.blurSize = DEF_BLUR_SIZE; p.nearScale = 1.f; p.farScale = 1.f; p.edgeExpand = DEF_EDGE_EXPAND;
-	p.shape = SHAPE_CIRCLE; p.shapeRotation = 0.f; p.highlights = DEF_HIGHLIGHTS; p.highlightThreshold = DEF_HIGHLIGHT_THR;
+	p.shape = SHAPE_CIRCLE; p.shapeRotation = 0.f; p.blades = 6; p.roundness = 0.f; p.aspect = 1.f; p.catEye = 0.f; p.bubble = 0.f; p.fringe = 0.f; p.highlights = DEF_HIGHLIGHTS; p.highlightThreshold = DEF_HIGHLIGHT_THR;
 	p.quality = QUALITY_NORMAL; p.depthNear = 1; p.depthSnap = true; p.depthStabilize = 0; p.passEncoding = 1;
 	p.inputLinear = false; p.outputMode = OUTPUT_FINAL; p.mix = 1.f;
 	p.subjectChannel = 1; p.subjectAmount = 0.f; p.subjectFlatten = 1.f;
@@ -68,6 +68,7 @@ int main(int argc, char **argv)
 		else if (k == "subjectrgb") { subjectRgbFile = v; p.subjectChannel = 3; }   /* キャラごとの RGB のマスク (W x H x 3) */
 		else if (k == "keep") p.subjectAmount = f;
 		else if (k == "flatten") p.subjectFlatten = f;
+		else if (k == "inset") p.subjectInset = f;
 		/* ピント送りの途中: pull=ax,ay,bx,by,t (A→B を t の割合だけ進んだところ) */
 		else if (k == "pull") {
 			float v5[5] = {0, 0, 0, 0, 0};
@@ -89,6 +90,12 @@ int main(int argc, char **argv)
 		else if (k == "soften") p.edgeSoften = f;
 		else if (k == "shape") p.shape = (int)f;
 		else if (k == "rot") p.shapeRotation = f;
+		else if (k == "blades") { p.blades = (int)f; p.shape = SHAPE_POLYGON; }
+		else if (k == "round") p.roundness = f;
+		else if (k == "aspect") p.aspect = f;
+		else if (k == "cateye") p.catEye = f;
+		else if (k == "bubble") p.bubble = f;
+		else if (k == "fringe") p.fringe = f;
 		else if (k == "hl") p.highlights = f;
 		else if (k == "hlth") p.highlightThreshold = f;
 		else if (k == "quality") p.quality = (int)f;
