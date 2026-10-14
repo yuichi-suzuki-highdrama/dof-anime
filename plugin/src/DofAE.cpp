@@ -218,7 +218,7 @@ static float RenderFrameCPU(DofContext &c, const DfImage &src, const DfAuxMap &d
 			parallelRows(H, [&](A_long y) {
 				for (int x = 0; x < W; ++x) {
 					float o[3];
-					dfSubjectAtF3(subjectMap, c.p.subjectChannel, (float)x * subjectMap.sx + subjectMap.ox, (float)y * subjectMap.sy + subjectMap.oy, o);
+					dfSubjectSmooth3(subjectMap, c.p.subjectChannel, (float)x, (float)y, DF_SUBJECT_SMOOTH_1080 * c.layerH / 1080.f, o);
 					const size_t n = (size_t)y * W + x;
 					dfSubjectWeights(&c, o, subject[n], subjectTgt[n]);
 				}

@@ -124,7 +124,7 @@ __global__ void kSubject(DofContext c, DfAuxMap map, float *subject, float *tgtO
 {
 	DF_XY(c.outW, c.outH);
 	float o[3], w, tgt;
-	dfSubjectAtF3(map, c.p.subjectChannel, (float)x * map.sx + map.ox, (float)y * map.sy + map.oy, o);
+	dfSubjectSmooth3(map, c.p.subjectChannel, (float)x, (float)y, DF_SUBJECT_SMOOTH_1080 * c.layerH / 1080.f, o);
 	dfSubjectWeights(&c, o, w, tgt);
 	const size_t n = (size_t)y * c.outW + x;
 	subject[n] = w;

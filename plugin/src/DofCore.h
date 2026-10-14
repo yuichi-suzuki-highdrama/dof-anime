@@ -507,6 +507,27 @@ DF_HD DF_INL void dfSubjectAtF3(const DfAuxMap &m, int channel, float fx, float 
 	o[0] = dfSat(o[0]); o[1] = dfSat(o[1]); o[2] = dfSat(o[2]);
 }
 
+/* 出力の画素 (x, y) のキャラごとのマスクを、まわり 3x3 点 (間隔 r 出力画素、重み 1-2-1) の平均で読む。
+   マスクの縁 (特にキャラどうしが接する所) は画素の段差でギザギザになり、それがそのまま、くっきりとぼけの境目になるので、
+   少しなめらかにしてから使う */
+static constexpr float DF_SUBJECT_SMOOTH_1080 = 3.f;    /* なめらかにする間隔 (1080p でのピクセル数) */
+
+DF_HD DF_INL void dfSubjectSmooth3(const DfAuxMap &m, int channel, float x, float y, float r, float o[3])
+{
+	o[0] = o[1] = o[2] = 0.f;
+	if (!m.img.data) return;
+	float ws = 0.f;
+	for (int j = -1; j <= 1; ++j)
+		for (int i = -1; i <= 1; ++i) {
+			const float w = (float)((2 - (i < 0 ? -i : i)) * (2 - (j < 0 ? -j : j)));
+			float q[3];
+			dfSubjectAtF3(m, channel, (x + (float)i * r) * m.sx + m.ox, (y + (float)j * r) * m.sy + m.oy, q);
+			o[0] += q[0] * w; o[1] += q[1] * w; o[2] += q[2] * w;
+			ws += w;
+		}
+	o[0] /= ws; o[1] /= ws; o[2] /= ws;
+}
+
 /* キャラ全員を合わせたマスク */
 DF_HD DF_INL float dfSubjectAtF(const DfAuxMap &m, int channel, float fx, float fy)
 {
