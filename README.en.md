@@ -3,11 +3,12 @@
 An After Effects effect that adds depth of field (out-of-focus blur) to AI-generated anime footage.
 It estimates depth from the video, focuses on the depth under a point you pick, and blurs what is in front of and behind it.
 
-[日本語](README.md)
+[日本語](README.md) | How it works: [docs/how-it-works.en.md](docs/how-it-works.en.md)
 
 - **Focus**: drag the Focus Point in the Composition panel to focus on the depth there. Keyframe it for a focus pull; Focus Pull Time (seconds, 0.8 by default) eases the pull in and out like a film focus puller, even across hold keyframes. You can also focus by depth value (Focus Mode = Depth).
-- **Clean edges**: near and far blur are computed separately. Blurred background does not bleed onto the in-focus subject, and near blur spreads semi-transparently over what is behind it.
-- **Bokeh**: colours are mixed in linear light, so bright spots become round, hexagonal or octagonal bokeh.
+- **Clean edges**: near and far blur are computed separately. Blurred background does not bleed onto the in-focus subject, and near blur spreads semi-transparently over what is behind it. Edge Bias / Edge Soften join the small offset between depth and drawn outlines smoothly.
+- **Bokeh**: colours are mixed in linear light, so bright spots become bokeh balls. Choose blade count, roundness, aspect, cat eye (optical vignetting), bubble (bright rims) and fringe (coloured rims).
+- **Character mattes (optional)**: SAM 3.1 finds and tracks characters. The matte only evens out the inside of a character (Subject Inset); edges come from depth.
 - **Speed**: about 2–3 ms per frame on the GPU (CUDA, RTX 5090, 1376×768). The CPU path also works (about 0.1 s at the same size). CPU and GPU differ by at most one 8-bit step.
 - **Stable in video**: depth is smoothed over neighbouring frames before use.
 
@@ -53,11 +54,14 @@ To override settings for DoF Anime only, put key=value lines in `%APPDATA%\SRLM\
 2. Depth is generated and wired as a hidden "DoF depth" layer (instantly if cached).
 3. Drag the "Focus" frame in the Composition panel to what should be sharp.
 4. Set the amount with Blur Size; adjust near and far separately with Near Blur / Far Blur. Near Blur defaults to 0 (only what is behind the focus blurs); raise it for shots that need foreground bokeh.
-5. By default no character matte is used: blur comes from depth alone, with edges joined smoothly by Edge Bias / Edge Soften. To keep a whole character evenly sharp, turn on Auto Subject or press Generate Subject; a character matte is then generated and wired to Subject Layer (you can also pick a cut-out such as a Roto Brush layer yourself). Estimated depth varies within a character (hair tips, legs, frills), so depth inside the matte is pulled towards the character's representative depth (Subject Flatten). Put the Focus Point on the character to bring the whole character into focus; move it to the background and the character blurs evenly. Keep Subject Sharp (0% by default) forces the matte to stay sharp wherever the focus is. For spots the automatic matte misses, draw a mask on a solid and pick it as Sharp Layer (always sharp) or Blur Layer (blurred like the farthest background). Or press "Text..." under Sharp by Text / Blur by Text and type object names (e.g. flower, grass): SAM 3.1 finds and tracks them through the clip and wires the matte for you (optionally only the one at the Focus Point). The automatic matte finds and tracks characters with SAM 3.1, uses the depth map to fix large misses and spills, and re-solves the edge from the image colours (closed-form matting). Choose the edge method with `subject_matte` in %APPDATA%\SRLM\DoFAnime.ini: `depthcf` (default), `cf` (no depth), `sam2matting` (cleanest but **non-commercial**) or `none`.
+5. By default no character matte is used: blur comes from depth alone, with edges joined smoothly by Edge Bias / Edge Soften. To keep a whole character evenly sharp, turn on Auto Subject or press Generate Subject; a character matte is then generated and wired to Subject Layer (you can also pick a cut-out such as a Roto Brush layer yourself). Estimated depth varies within a character (hair tips, legs, frills), so depth inside the matte is pulled towards the character's representative depth (Subject Flatten). The matte is shrunk by Subject Inset (12 px by default) so that only the inside is evened out and the edge comes from depth. Put the Focus Point on the character to bring the whole character into focus; move it to the background and the character blurs evenly. Keep Subject Sharp (0% by default) forces the matte to stay sharp wherever the focus is. For spots the automatic matte misses, draw a mask on a solid and pick it as Sharp Layer (always sharp) or Blur Layer (blurred like the farthest background). Or press "Text..." under Sharp by Text / Blur by Text and type object names (e.g. flower, grass): SAM 3.1 finds and tracks them through the clip and wires the matte for you (optionally only the one at the Focus Point). The automatic matte finds and tracks characters with SAM 3.1, uses the depth map to fix large misses and spills, and re-solves the edge from the image colours (closed-form matting). Choose the edge method with `subject_matte` in %APPDATA%\SRLM\DoFAnime.ini: `depthcf` (default), `cf` (no depth), `sam2matting` (cleanest but **non-commercial**) or `none`.
 
 Output = Blur Map shows the blur size (near = blue, far = orange, in focus = black). Focus Check tints the in-focus area green.
 
 ## How it works
+
+See [docs/how-it-works.en.md](docs/how-it-works.en.md) for edge handling, character mattes, lens character, a comparison with AE's Camera Lens Blur, and building from scratch. In short:
+
 
 1. Convert the input to linear light and build 1/2, 1/4 and 1/8 downsampled copies.
 2. Smooth depth with the median of neighbouring frames; take the median depth around the Focus Point as the focus depth.
@@ -73,7 +77,8 @@ Output = Blur Map shows the blur size (near = blue, far = orange, in focus = bla
 
 - Where the estimated depth edge does not match the drawn outline, the blur edge is off too. Too much Edge Expand leaves a sharp sliver of background just outside the outline.
 - Heavily blurred foreground cannot reveal background that the image never contained; it is filled from nearby colours.
-- Depth varies within a character, so a narrow Focus Range can blur part of a face.
+- Depth varies within a character, so a narrow Focus Range can blur part of a face (a character matte with Subject Flatten evens this out).
+- Thin hair tips can be missing from depth and stay sharp. Setting `depth_input_size=770` in the settings file captures them (about 21 GB of VRAM).
 
 ## Licence
 

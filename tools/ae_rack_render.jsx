@@ -6,11 +6,11 @@
  * ae_rack_setup.jsx のあと、深度とキャラのマスクが結線されてから実行する。
  *   0〜2 秒: 前のキャラにピント → 2 秒で後ろのキャラへ (停止したキーフレーム。Focus Pull Time の分だけかけて移る)
  *   4〜5 秒: なめらかに前のキャラへ戻す (イージーイーズ) → 6 秒まで
- * 書き出し先は環境変数 DOF_RACK_OUT、無ければ下の OUT_MP4。プロジェクトは保存しない。
+ * 書き出し先は環境変数 DOF_RACK_OUT、無ければ一時フォルダの dof_ae_test/rack_focus.mp4。プロジェクトは保存しない。
  */
 (function () {
     var LOGDIR = Folder.temp.fsName.replace(/\\/g, "/") + "/dof_ae_test/";
-    var OUT_MP4 = $.getenv("DOF_RACK_OUT") || "C:/path/to/output/rack_focus.mp4";
+    var OUT_MP4 = $.getenv("DOF_RACK_OUT") || (Folder.temp.fsName.replace(/\\/g, "/") + "/dof_ae_test/rack_focus.mp4");
     /* 顔の位置 (素材の画素。1456x816 の絵の場合) */
     var FRONT = [735, 195], BACK = [1135, 170];
     var lines = [];

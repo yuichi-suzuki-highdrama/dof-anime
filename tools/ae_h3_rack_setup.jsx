@@ -8,7 +8,7 @@
  */
 (function () {
     var OUT = Folder.temp.fsName.replace(/\\/g, "/") + "/dof_ae_test/";
-    var SRC = "C:/path/to/output/h3/s2026101511_00001_original.mp4";
+    var SRC = $.getenv("DOF_RACK_SRC");   /* 素材の動画 (必須) */
     var lines = [];
     function log(s) { lines.push(s); }
     function flush() {
@@ -20,6 +20,7 @@
     try {
         var proj = app.newProject();
         proj.bitsPerChannel = 16;
+        if (!SRC) throw new Error("set the source path in the environment variable DOF_RACK_SRC");
         var src = proj.importFile(new ImportOptions(new File(SRC)));
         var comp = proj.items.addComp("H3RackFocus", src.width, src.height, 1.0, src.duration, src.frameRate);
         var layer = comp.layers.add(src);

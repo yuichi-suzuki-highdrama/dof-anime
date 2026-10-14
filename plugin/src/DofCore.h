@@ -139,7 +139,7 @@ static constexpr float DF_STEP_MASK       = 0.5f;    /* キャラの縁とみな
 static constexpr float DF_FOCUS_WINDOW    = 0.012f;  /* Focus Point のまわりで深度を調べる範囲 (画面の高さに対する半径) */
 static constexpr int   DF_STABILIZE_MAX   = 2;       /* 前後何フレームまで */
 static constexpr float DF_SNAP_SIGMA      = 0.08f;   /* 深度を線画に合わせるとき、色の近さの幅 */
-static constexpr float DF_FRINGE_MAX = 0.08f;   /* Fringe 100% のときの、赤と青の半径の差 (緑に対する割合) */
+static constexpr float DF_FRINGE_MAX      = 0.08f;   /* Fringe 100% のときの、赤と青の半径の差 (緑に対する割合) */
 static constexpr float DF_GOLDEN_ANGLE    = 2.39996323f;
 
 /* 品質ごとの点の数 (ぼけが大きいとき) */

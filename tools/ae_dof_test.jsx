@@ -12,7 +12,7 @@
  */
 (function () {
     var OUT = Folder.temp.fsName.replace(/\\/g, "/") + "/dof_ae_test/";
-    var SRC = $.getenv("DOF_TEST_SRC") || "C:/path/to/source.mp4";
+    var SRC = $.getenv("DOF_TEST_SRC");   /* 素材の動画 (必須) */
     var lines = [];
     function log(s) { lines.push(s); }
     function flush() {
@@ -25,6 +25,7 @@
         try { app.preferences.savePrefAsLong("Main Pref Section", "Pref_SCRIPTING_FILE_NETWORK_SECURITY", 1); } catch (e0) {}
         var proj = app.newProject();
         proj.bitsPerChannel = 16;
+        if (!SRC) throw new Error("set the source path in the environment variable DOF_TEST_SRC");
         var src = proj.importFile(new ImportOptions(new File(SRC)));
         var comp = proj.items.addComp("DoFTest", src.width, src.height, 1.0, src.duration, src.frameRate);
         var layer = comp.layers.add(src);

@@ -47,7 +47,8 @@
         var rq = app.project.renderQueue;
         for (var n = 0; n < NEARS.length; ++n) {
             fx.property("Near Blur").setValue(NEARS[n]);
-            var out = "C:/path/to/output/h3/h3_rack_focus_near" + NEARS[n] + ".mp4";
+            var outDir = $.getenv("DOF_RACK_OUT_DIR") || (Folder.temp.fsName.replace(/\\/g, "/") + "/dof_ae_test");
+            var out = outDir + "/rack_focus_near" + NEARS[n] + ".mp4";
             while (rq.numItems > 0) rq.item(1).remove();
             var rqi = rq.items.add(comp);
             rqi.outputModule(1).file = new File(out);

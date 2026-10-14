@@ -9,7 +9,7 @@
  */
 (function () {
     var OUT = Folder.temp.fsName.replace(/\\/g, "/") + "/dof_ae_test/";
-    var SRC = $.getenv("DOF_RACK_SRC") || "C:/path/to/output/two_girls.png";
+    var SRC = $.getenv("DOF_RACK_SRC");   /* 素材の静止画 (必須) */
     var lines = [];
     function log(s) { lines.push(s); }
     function flush() {
@@ -21,6 +21,7 @@
     try {
         var proj = app.newProject();
         proj.bitsPerChannel = 16;
+        if (!SRC) throw new Error("set the source path in the environment variable DOF_RACK_SRC");
         var src = proj.importFile(new ImportOptions(new File(SRC)));
         var comp = proj.items.addComp("RackFocus", src.width, src.height, 1.0, 6.0, 24);
         var layer = comp.layers.add(src);
