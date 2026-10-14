@@ -5,7 +5,7 @@ It estimates depth from the video, focuses on the depth under a point you pick, 
 
 [日本語](README.md)
 
-- **Focus**: drag the Focus Point in the Composition panel to focus on the depth there. Keyframe it for a focus pull. You can also focus by depth value (Focus Mode = Depth).
+- **Focus**: drag the Focus Point in the Composition panel to focus on the depth there. Keyframe it for a focus pull; Focus Pull Time (seconds, 0.8 by default) eases the pull in and out like a film focus puller, even across hold keyframes. You can also focus by depth value (Focus Mode = Depth).
 - **Clean edges**: near and far blur are computed separately. Blurred background does not bleed onto the in-focus subject, and near blur spreads semi-transparently over what is behind it.
 - **Bokeh**: colours are mixed in linear light, so bright spots become round, hexagonal or octagonal bokeh.
 - **Speed**: about 2–3 ms per frame on the GPU (CUDA, RTX 5090, 1376×768). The CPU path also works (about 0.1 s at the same size). CPU and GPU differ by at most one 8-bit step.

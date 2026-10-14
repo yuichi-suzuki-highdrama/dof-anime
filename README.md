@@ -64,6 +64,7 @@ Output を Blur Map にすると、ぼけの大きさが見えます（手前 = 
 | Auto | Auto Passes / Depth Engine / Generate Depth / Clean Cache... | 深度の自動生成（Relight Anime と同じ） |
 | Focus | Focus Mode | Point: Focus Point の位置の深度に合わせる。Depth: Focus Depth の値で合わせる |
 | | Focus Point | ピントを合わせる位置（コンポビューでドラッグ） |
+| | Focus Pull Time | ピント送りにかける時間（秒、既定 0.8）。映画のフォーカス送りのように、ゆっくり動き始めてゆっくり止まる。停止したキーフレームでパッと切り替えても、この時間で移る。0 でキーフレームのとおり |
 | | Focus Depth | Focus Mode = Depth のときの深度（0..1、近い = 1） |
 | | Focus Range | ピントの合う幅（深度の差）。広げると人物全体にピントが合う |
 | | Subject Layer / Subject Channel | キャラのマスク（自動で作ったもの、またはロトブラシで切り抜いたレイヤーなど） |
