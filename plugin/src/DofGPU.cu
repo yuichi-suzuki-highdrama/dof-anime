@@ -166,13 +166,30 @@ __global__ void kStepV(const float *mnH, const float *mxH, const float *wmH, con
 	depth[n] = dfStepDepth(depth[n], mn, mx, subject ? subject[n] : 0.f, wm, ts, focus);
 }
 
-/* ぼけの大きさ。Keep Subject Sharp の分だけぼけを減らす */
-__global__ void kCoc(DofContext c, const float *depth, float *coc)
+/* 手直しのレイヤー (Sharp Layer / Blur Layer) のアルファ */
+__global__ void kFix(DofContext c, DfAuxMap sharpMap, DfAuxMap blurMap, float *sharp, float *blur)
+{
+	DF_XY(c.outW, c.outH);
+	const size_t n = (size_t)y * c.outW + x;
+	sharp[n] = sharpMap.img.data ? dfFixAt(sharpMap, (float)x * sharpMap.sx + sharpMap.ox, (float)y * sharpMap.sy + sharpMap.oy) : 0.f;
+	blur[n]  = blurMap.img.data ? dfFixAt(blurMap, (float)x * blurMap.sx + blurMap.ox, (float)y * blurMap.sy + blurMap.oy) : 0.f;
+}
+
+/* Blur Layer: 塗った所は画面のいちばん奥と同じだけぼかす */
+__global__ void kBlurFix(const float *blur, float *depth, int W, int H, float farD)
+{
+	DF_XY(W, H);
+	const size_t n = (size_t)y * W + x;
+	depth[n] = dfBlurFix(depth[n], blur[n], farD);
+}
+
+/* ぼけの大きさ。Keep Subject Sharp と Sharp Layer の分だけぼけを減らす */
+__global__ void kCoc(DofContext c, const float *depth, const float *sharp, float *coc)
 {
 	DF_XY(c.outW, c.outH);
 	const size_t n = (size_t)y * c.outW + x;
 	const float s = c.subject ? c.subject[n] : 0.f;
-	coc[n] = dfCoc(&c, depth[n]) * (1.f - dfSat(s * c.p.subjectAmount));
+	coc[n] = dfCoc(&c, depth[n]) * (1.f - dfSat(s * c.p.subjectAmount)) * (1.f - (sharp ? sharp[n] : 0.f));
 }
 
 __global__ void kTileMax(DofContext c, float *tileMax)
@@ -261,6 +278,7 @@ int DofGPU_Render(DfGpuFrame &f, char *err, int errLen)
 	for (int k = 0; k < DF_LEVELS; ++k) count((size_t)c.lw[k] * c.lh[k] * 4);
 	if (hasDepth) {
 		count((size_t)dw * dh); count(NP); count(NP); count(NP);
+		if (f.sharpMap.img.data || f.blurMap.img.data) { count(NP); count(NP); }
 		if (hasSubject) { count(NP); count(NP); count(NP); count(NP); count((size_t)dw * dh * 3); }
 		count((size_t)c.tilesX * c.tilesY); count((size_t)c.tilesX * c.tilesY);
 	}
@@ -324,6 +342,21 @@ int DofGPU_Render(DfGpuFrame &f, char *err, int errLen)
 			c.subjectTgt = tgt;
 			kBlend<<<Grid2(W, H), BLOCK2>>>(c, depth);
 		}
+		/* 手直しのレイヤー。Blur Layer の所は画面のいちばん奥と同じだけぼかす */
+		float *sharpB = NULL;
+		if (f.sharpMap.img.data || f.blurMap.img.data) {
+			float *blurB = cv.take(NP);
+			sharpB = cv.take(NP);
+			kFix<<<Grid2(W, H), BLOCK2>>>(c, f.sharpMap, f.blurMap, sharpB, blurB);
+			if (f.blurMap.img.data) {
+				/* 画面のいちばん奥の深度 (深度の点をホストへ写して) */
+				std::vector<float> hl((size_t)dw * dh);
+				cudaMemcpy(hl.data(), low, sizeof(float) * hl.size(), cudaMemcpyDeviceToHost);
+				kBlurFix<<<Grid2(W, H), BLOCK2>>>(blurB, depth, W, H, dfFarPercentile(hl.data(), hl.size()));
+			}
+			if (!f.sharpMap.img.data) sharpB = NULL;
+			DF_CHECK("fix");
+		}
 		const int step = dfRound(c.step);
 		if (step > 0) {
 			float *wm = NULL, *ts = NULL;
@@ -331,7 +364,7 @@ int DofGPU_Render(DfGpuFrame &f, char *err, int errLen)
 			kMinMaxH<<<Grid2(W, H), BLOCK2>>>(depth, c.subject, c.subjectTgt, tmp, coc, wm, ts, W, H, step);   /* coc を作業に使う */
 			kStepV<<<Grid2(W, H), BLOCK2>>>(tmp, coc, wm, ts, c.subject, depth, W, H, step, c.focus);
 		}
-		kCoc<<<Grid2(W, H), BLOCK2>>>(c, depth, coc);
+		kCoc<<<Grid2(W, H), BLOCK2>>>(c, depth, sharpB, coc);
 		DF_CHECK("coc");
 		c.depth = depth;
 		c.coc = coc;

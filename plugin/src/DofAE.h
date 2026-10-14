@@ -49,6 +49,8 @@ enum {
 	DOF_AUTO_SUBJECT,         /* 深度を作ったあと、キャラのマスクも自動で作る */
 	DOF_SUBJECT_TYPE,         /* 1: Anime Character  2: Person  3: Animal */
 	DOF_SUBJECT_GENERATE,     /* ボタン: 今の Focus Point でマスクを作り直す */
+	DOF_SHARP_LAYER,          /* 手直し: このレイヤーのアルファの所は必ずくっきり */
+	DOF_BLUR_LAYER,           /* 手直し: このレイヤーのアルファの所は周りの奥の深度でぼかす */
 	DOF_TOPIC_FOCUS_END,
 
 	/* --- Blur --- */
@@ -109,6 +111,8 @@ enum {
 	ID_SUBJECT_GENERATE,
 	ID_SUBJECT_FLATTEN,
 	ID_FOCUS_PULL,
+	ID_SHARP_LAYER,
+	ID_BLUR_LAYER,
 
 	ID_TOPIC_BLUR = 50,
 	ID_BLUR_SIZE,
@@ -147,6 +151,8 @@ struct PreRenderData {
 	bool     depthChecked;
 	PF_LRect subjectRect; /* キャラのマスクのレイヤーも全体を取り出す */
 	bool     subjectChecked;
+	PF_LRect fixRect[2];  /* 手直しのレイヤー (Sharp Layer, Blur Layer) も全体を取り出す */
+	bool     fixChecked[2];
 	/* 深度を時間方向にならすための前後のフレーム */
 	int      nbCount;
 	int      nbOff[4];

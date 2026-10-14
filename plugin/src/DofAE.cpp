@@ -149,7 +149,7 @@ static const float *HostLut()
  * 戻り値: 使ったピントの深度
  */
 static float RenderFrameCPU(DofContext &c, const DfImage &src, const DfAuxMap &depthMap, const DfAuxMap &subjectMap,
-                            const DfImage *nb, int nbCount, std::vector<DfRgba> &out)
+                            const DfImage *nb, int nbCount, std::vector<DfRgba> &out, const DfAuxMap *fixMaps = NULL)
 {
 	const int W = c.outW, H = c.outH;
 	const size_t NP = (size_t)W * H;
@@ -232,6 +232,26 @@ static float RenderFrameCPU(DofContext &c, const DfImage &src, const DfAuxMap &d
 				}
 			});
 		}
+		/* 手直しのレイヤー (fixMaps[0] = Sharp Layer、[1] = Blur Layer)。Blur Layer の所は画面のいちばん奥と同じだけぼかす */
+		const bool hasSharp = fixMaps && fixMaps[0].img.data, hasBlur = fixMaps && fixMaps[1].img.data;
+		std::vector<float> sharpB, blurB;
+		if (hasSharp || hasBlur) {
+			sharpB.assign(NP, 0.f);
+			blurB.assign(NP, 0.f);
+			parallelRows(H, [&](A_long y) {
+				for (int x = 0; x < W; ++x) {
+					const size_t n = (size_t)y * W + x;
+					if (hasSharp) sharpB[n] = dfFixAt(fixMaps[0], (float)x * fixMaps[0].sx + fixMaps[0].ox, (float)y * fixMaps[0].sy + fixMaps[0].oy);
+					if (hasBlur)  blurB[n]  = dfFixAt(fixMaps[1], (float)x * fixMaps[1].sx + fixMaps[1].ox, (float)y * fixMaps[1].sy + fixMaps[1].oy);
+				}
+			});
+			if (hasBlur) {
+				const float farD = dfFarPercentile(low.data(), low.size());
+				parallelRows(H, [&](A_long y) {
+					for (int x = 0; x < W; ++x) { const size_t n = (size_t)y * W + x; depth[n] = dfBlurFix(depth[n], blurB[n], farD); }
+				});
+			}
+		}
 		/* 深度の段差を締める (手前と奥の境目にピントの合った線が出ないように)。coc を作業に使う */
 		const int step = dfRound(c.step);
 		if (step > 0) {
@@ -258,7 +278,7 @@ static float RenderFrameCPU(DofContext &c, const DfImage &src, const DfAuxMap &d
 			for (int x = 0; x < W; ++x) {
 				const size_t n = (size_t)y * W + x;
 				const float s = c.subject ? c.subject[n] : 0.f;
-				coc[n] = dfCoc(&c, depth[n]) * (1.f - dfSat(s * c.p.subjectAmount));
+				coc[n] = dfCoc(&c, depth[n]) * (1.f - dfSat(s * c.p.subjectAmount)) * (1.f - (hasSharp ? sharpB[n] : 0.f));
 			}
 		});
 		c.depth = depth.data();
@@ -437,6 +457,13 @@ static PF_Err ParamsSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef 
 	PF_ADD_POPUP("Subject Type", 3, 1, "Anime Character|Person|Animal", ID_SUBJECT_TYPE);
 
 	PF_ADD_BUTTON("Subject Mask", "Generate Subject", 0, PF_ParamFlag_SUPERVISE, ID_SUBJECT_GENERATE);
+
+	/* 手直し: 自動で拾えない所を描いて直す (平面にマスクを描いて指定。アルファの所が対象)。
+	   Sharp Layer の所は必ずくっきり、Blur Layer の所は周りの奥の深度でぼかす */
+	AEFX_CLR_STRUCT(def);
+	PF_ADD_LAYER("Sharp Layer", PF_LayerDefault_NONE, ID_SHARP_LAYER);
+	AEFX_CLR_STRUCT(def);
+	PF_ADD_LAYER("Blur Layer", PF_LayerDefault_NONE, ID_BLUR_LAYER);
 
 	AEFX_CLR_STRUCT(def);
 	PF_END_TOPIC(ID_TOPIC_FOCUS_END);
@@ -816,10 +843,11 @@ static PF_Err PreRender(PF_InData *in_data, PF_OutData *out_data, PF_PreRenderEx
 
 	/* 深度レイヤーとキャラのマスクのレイヤーは全体を取り出す (Relight Anime と同じ。まず 1 画素だけ要求して全体の範囲を知る)。
 	   未指定でも番号は予約しておく (予約していない番号を取り出すと AE が「Unknown checkout id」を出す) */
-	for (int which = 0; which < 2; ++which) {
-		const A_long idx = which == 0 ? DOF_DEPTH_LAYER : DOF_SUBJECT_LAYER;
-		PF_LRect &rect = which == 0 ? prd->depthRect : prd->subjectRect;
-		bool &checked = which == 0 ? prd->depthChecked : prd->subjectChecked;
+	for (int which = 0; which < 4; ++which) {
+		static const A_long idxOf[4] = {DOF_DEPTH_LAYER, DOF_SUBJECT_LAYER, DOF_SHARP_LAYER, DOF_BLUR_LAYER};
+		const A_long idx = idxOf[which];
+		PF_LRect &rect = which == 0 ? prd->depthRect : (which == 1 ? prd->subjectRect : prd->fixRect[which - 2]);
+		bool &checked = which == 0 ? prd->depthChecked : (which == 1 ? prd->subjectChecked : prd->fixChecked[which - 2]);
 		PF_CheckoutResult probe;
 		AEFX_CLR_STRUCT(probe);
 		PF_RenderRequest probeReq = req;
@@ -913,7 +941,7 @@ static PF_Err SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRend
 {
 	PF_Err err = PF_Err_NONE, err2 = PF_Err_NONE;
 
-	PF_EffectWorld *inputP = NULL, *outputP = NULL, *depthP = NULL, *subjectP = NULL;
+	PF_EffectWorld *inputP = NULL, *outputP = NULL, *depthP = NULL, *subjectP = NULL, *fixP[2] = {NULL, NULL};
 	ERR(extra->cb->checkout_layer_pixels(in_data->effect_ref, DOF_INPUT, &inputP));
 	ERR(extra->cb->checkout_output(in_data->effect_ref, &outputP));
 
@@ -925,6 +953,12 @@ static PF_Err SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRend
 		if (!prd || !prd->subjectChecked || extra->cb->checkout_layer_pixels(in_data->effect_ref, DOF_SUBJECT_LAYER, &subjectP)) subjectP = NULL;
 		if (subjectP && !isGPU && !subjectP->data) subjectP = NULL;
 		if (subjectP && subjectP->width <= 0) subjectP = NULL;
+		for (int k = 0; k < 2; ++k) {
+			const A_long idx = k == 0 ? DOF_SHARP_LAYER : DOF_BLUR_LAYER;
+			if (!prd || !prd->fixChecked[k] || extra->cb->checkout_layer_pixels(in_data->effect_ref, idx, &fixP[k])) fixP[k] = NULL;
+			if (fixP[k] && !isGPU && !fixP[k]->data) fixP[k] = NULL;
+			if (fixP[k] && fixP[k]->width <= 0) fixP[k] = NULL;
+		}
 	}
 
 	/* 前後のフレームの深度。大きさが違うものは使わない */
@@ -998,6 +1032,7 @@ static PF_Err SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRend
 		AEFX_CLR_STRUCT(noRect);
 		auto depthMapOf = [&](const DfImage &img) { return auxMapOf(img, prd ? prd->depthRect : noRect, depthP); };
 		auto subjectMapOf = [&](const DfImage &img) { return auxMapOf(img, prd ? prd->subjectRect : noRect, subjectP); };
+		auto fixMapOf = [&](int k, const DfImage &img) { return auxMapOf(img, prd ? prd->fixRect[k] : noRect, fixP[k]); };
 
 		if (!isGPU) {
 			PF_PixelFormat fmt = PF_PixelFormat_ARGB32;
@@ -1008,7 +1043,8 @@ static PF_Err SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRend
 			DfImage nbImg[4];
 			for (int k = 0; k < nbN; ++k) nbImg[k] = ImageOf(nbW[k], code);
 			std::vector<DfRgba> buf;
-			focusUsed = RenderFrameCPU(ctx, ImageOf(inputP, code), depthMap, subjectMapOf(ImageOf(subjectP, code)), nbImg, nbN, buf);
+			const DfAuxMap fixMaps[2] = {fixMapOf(0, ImageOf(fixP[0], code)), fixMapOf(1, ImageOf(fixP[1], code))};
+			focusUsed = RenderFrameCPU(ctx, ImageOf(inputP, code), depthMap, subjectMapOf(ImageOf(subjectP, code)), nbImg, nbN, buf, fixMaps);
 			WriteWorld(outputP, fmt, buf);
 		} else {
 			AEFX_SuiteScoper<PF_GPUDeviceSuite1> gpu(in_data, kPFGPUDeviceSuite, kPFGPUDeviceSuiteVersion1, out_data);
@@ -1030,6 +1066,10 @@ static PF_Err SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRend
 				f.ctx = ctx;
 				f.depthMap    = depthMapOf(ImageOf(depthMem ? depthP : NULL, DF_FMT_BGRA32F, depthMem));
 				f.subjectMap  = subjectMapOf(ImageOf(subjectMem ? subjectP : NULL, DF_FMT_BGRA32F, subjectMem));
+				for (int k = 0; k < 2; ++k) {
+					void *fm = mem(fixP[k]);
+					(k == 0 ? f.sharpMap : f.blurMap) = fixMapOf(k, ImageOf(fm ? fixP[k] : NULL, DF_FMT_BGRA32F, fm));
+				}
 				f.src         = ImageOf(inputP, DF_FMT_BGRA32F, srcMem);
 				f.dst         = dstMem;
 				f.dstRowbytes = outputP->rowbytes;
@@ -1079,6 +1119,8 @@ static PF_Err SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRend
 	ERR2(extra->cb->checkin_layer_pixels(in_data->effect_ref, DOF_INPUT));
 	if (depthP) ERR2(extra->cb->checkin_layer_pixels(in_data->effect_ref, DOF_DEPTH_LAYER));
 	if (subjectP) ERR2(extra->cb->checkin_layer_pixels(in_data->effect_ref, DOF_SUBJECT_LAYER));
+	if (fixP[0]) ERR2(extra->cb->checkin_layer_pixels(in_data->effect_ref, DOF_SHARP_LAYER));
+	if (fixP[1]) ERR2(extra->cb->checkin_layer_pixels(in_data->effect_ref, DOF_BLUR_LAYER));
 	return err;
 }
 

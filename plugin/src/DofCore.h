@@ -449,6 +449,30 @@ DF_HD DF_INL float dfStepDepth(float d, float mn, float mx, float w, float wm, f
 	return dfMix(d, dfMix(mn, mx, a), e);
 }
 
+/* 手直しのレイヤー (Sharp Layer / Blur Layer) の 1 画素のアルファ (0..1)。fx, fy: レイヤーのワールドの画素 */
+DF_HD DF_INL float dfFixAt(const DfAuxMap &m, float fx, float fy);
+
+/* Blur Layer: 塗った所 (b) は、画面のいちばん奥 (farD) と同じだけぼかす (奥へだけ寄せる) */
+DF_HD DF_INL float dfBlurFix(float d, float b, float farD)
+{
+	return b > 0.f ? dfMix(d, dfMin(d, farD), b) : d;
+}
+
+/* 深度の点のうち、奥から 5% の深度 (近い = 1 なので小さい方から 5%)。ヒストグラムで */
+inline float dfFarPercentile(const float *low, size_t n)
+{
+	if (!low || n == 0) return 0.f;
+	int hist[256] = {0};
+	for (size_t i = 0; i < n; ++i) hist[dfClamp((int)(dfSat(low[i]) * 255.f + 0.5f), 0, 255)]++;
+	const size_t want = n / 20;
+	size_t acc = 0;
+	for (int k = 0; k < 256; ++k) {
+		acc += (size_t)hist[k];
+		if (acc > want) return (float)k / 255.f;
+	}
+	return 0.f;
+}
+
 /* キャラのマスク (Subject Layer) の 1 画素 (0..1)。深度と同じく、レイヤー全体を取り出して位置の割合で合わせる */
 /* マスクの位置 (fx, fy、マスクのワールドの画素) で、キャラごとのマスクを o[0..2] に入れる。
    Alpha / Luminance は 1 人分 (o[0] だけ)。Multi (RGB) は赤・緑・青を 1・2・3 人目とする */
@@ -489,6 +513,13 @@ DF_HD DF_INL void dfSubjectAtLow3(const DfAuxMap &depthMap, const DfAuxMap &m, i
 {
 	const float rx = m.sx / dfMax(depthMap.sx, 1e-6f), ry = m.sy / dfMax(depthMap.sy, 1e-6f);
 	dfSubjectAtF3(m, channel, ((float)i + 0.5f) * rx - 0.5f, ((float)j + 0.5f) * ry - 0.5f, o);
+}
+
+DF_HD DF_INL float dfFixAt(const DfAuxMap &m, float fx, float fy)
+{
+	float o[3];
+	dfSubjectAtF3(m, 1, fx, fy, o);
+	return dfSat(o[0]);
 }
 
 /* 出力の画素のキャラごとのマスク o → 全員を合わせたマスク w と、寄せる先の深度 tgt (キャラごとの代表の深度をマスクで重み付け。いなければ負) */

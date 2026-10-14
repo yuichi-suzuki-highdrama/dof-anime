@@ -70,6 +70,7 @@ Output を Blur Map にすると、ぼけの大きさが見えます（手前 = 
 | | Subject Layer / Subject Channel | キャラのマスク（自動で作ったもの、またはロトブラシで切り抜いたレイヤーなど） |
 | | Subject Flatten | マスクの中の深度を、キャラの代表の深度（マスクの中の深度の中央値）にどれだけ寄せるか。100% でキャラを 1 枚の板として扱い、キャラの中のぼけのむらが無くなる。0% で深度そのまま |
 | | Keep Subject Sharp | ピントに関係なく、マスクの中を必ずくっきり残す強さ（手前のぼけも重ねない）。既定は 0% |
+| | Sharp Layer / Blur Layer | 手直し。自動で拾えない所を、平面にマスクを描いて指定する（アルファの所が対象）。Sharp Layer の所は必ずくっきり、Blur Layer の所は画面のいちばん奥と同じだけぼかす |
 | | Auto Subject / Subject Type / Generate Subject | キャラのマスクを自動で作る（SAM 3.1 でキャラを見つけて動画全体で追いかけ、深度で大きな取りこぼし・拾いすぎを直し、縁を元の絵の色から切り抜き直す）。別のキャラにピントを移したら Generate Subject で作り直す。縁の仕上げ方は設定ファイル（%APPDATA%\SRLM\DoFAnime.ini）の `subject_matte` で変えられる: `depthcf`（既定）/ `cf`（深度を使わない）/ `sam2matting`（いちばんきれいだが**非商用**）/ `none` |
 | Blur | Blur Size | ピントから深度が 0.5 離れた所のぼけの半径（1080p でのピクセル数） |
 | | Near Blur / Far Blur | 手前 / 奥のぼけの倍率。Near Blur の既定は 0（手前はぼかさず奥だけ）。手前ボケが欲しいカットだけ上げる |
