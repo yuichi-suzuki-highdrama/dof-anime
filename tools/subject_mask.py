@@ -121,9 +121,6 @@ def clean_matte(m_u8, cv2, np, band=2.5):
     return (out * 255.0 + 0.5).astype(np.uint8)
 
 
-CF_BAND = 5   # クローズドフォームで計算し直す縁の幅 (画素、内と外それぞれ)
-
-
 def clean_binary(m_u8, cv2, np):
     """マスク (0..255) を 2 値にし、小さな切れ端 (本体の 0.5% 未満) を消し、内側の小さな穴 (2% 未満) を埋める"""
     H, W = m_u8.shape
@@ -200,7 +197,9 @@ def cf_matte(b, img, cv2, np):
     except Exception as e:  # noqa: BLE001  解けなければ 2 値のまま
         print(f"cf: {type(e).__name__}: {e}", flush=True)
         alpha = b.astype(np.float64)
-    return (np.clip(alpha, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
+    # ごく薄い値 (0.1 未満) は解いたときのノイズ (縁の外にトゲのように散らばる) なので消し、そのぶんコントラストを整える
+    alpha = np.clip((alpha - 0.1) / 0.8, 0.0, 1.0)
+    return (alpha * 255.0 + 0.5).astype(np.uint8)
 
 
 def load_depth(depth_dir, i, W, H, cv2, np):
@@ -303,6 +302,29 @@ def track_objects(sam, images, init, k, result, device, dtype, F, unpack_masks, 
     track(list(range(k, N)))
     if k > 0:
         track(list(range(k, -1, -1)))
+
+
+def refine_tracked(sam, images, result, k, device, dtype, F, comfy_utils, report):
+    """追いかけた各コマのマスクを、SAM の細かい段 (1008 画素、物の周りを切り出して) で詰め直す。
+    追跡のマスクは粗い解像度から引き伸ばしたもので、縁が元の絵の輪郭線から 10 画素以上ずれて波打つことがある
+    (そのままだと、縁の切り抜き直し (CF_BAND 画素の幅) が本当の輪郭を見つけられずガタガタになる)。
+    k コマ目は検出のときに詰め直してあるので飛ばす。result[i, :, :, s] (0..255) を書き換える"""
+    import numpy as np
+    import torch
+    N, H, W, S = result.shape
+    for i in range(N):
+        if i != k:
+            for s_ in range(S):
+                m = result[i, :, :, s_]
+                ys, xs = np.nonzero(m >= 128)
+                if len(xs) < 64:
+                    continue
+                box = (float(xs.min()), float(ys.min()), float(xs.max() + 1), float(ys.max() + 1))
+                logits = torch.from_numpy((m.astype(np.float32) / 255.0 * 2.0 - 1.0) * 8.0)
+                with torch.no_grad():
+                    r = refine_mask(sam, images[i], logits, box, H, W, device, dtype, F, comfy_utils)
+                result[i, :, :, s_] = (r.float() * 255 + 0.5).byte().cpu().numpy()
+        report((i + 1) / N)
 
 
 def write_json(path, obj, must=False):
@@ -448,7 +470,9 @@ def main():
 
         if not matted:
             track_objects(sam, images, init, k, result, device, dtype, F, unpack_masks,
-                          lambda v: write_json(status, {"state": "running", "pid": os.getpid(), "stage": "track", "progress": 0.05 + 0.9 * v}))
+                          lambda v: write_json(status, {"state": "running", "pid": os.getpid(), "stage": "track", "progress": 0.05 + 0.6 * v}))
+            refine_tracked(sam, images, result, k, device, dtype, F, comfy.utils,
+                           lambda v: write_json(status, {"state": "running", "pid": os.getpid(), "stage": "refine", "progress": 0.65 + 0.3 * v}))
 
         # --- 3. 仕上げ: 穴を埋め、切れ端を消し、縁を整える (コマごと、キャラごと) ---
         depth_dir = a.depth_dir or str(out.parent / "depth")

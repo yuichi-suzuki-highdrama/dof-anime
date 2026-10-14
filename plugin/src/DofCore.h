@@ -121,7 +121,8 @@ static constexpr float DF_FOCUS_SOFT      = 0.02f;   /* ピントの幅の外で
 static constexpr float DF_STEP_1080       = 8.f;     /* 深度の段差を締めるときに見るまわりの半径 (1080p でのピクセル数) */
 static constexpr float DF_STEP_LO         = 0.05f;   /* まわりの深度の幅がこれより小さければ段差ではない (なだらかな坂は締めない) */
 static constexpr float DF_STEP_HI         = 0.10f;   /* これより大きければ段差として締め切る */
-static constexpr float DF_STEP_MASK       = 0.05f;   /* キャラの縁とみなすマスクの値 (マスクは輪郭線の所で 0.1〜0.3 ほどなので、外側に取って輪郭線をキャラに含める) */
+static constexpr float DF_STEP_MASK       = 0.5f;    /* キャラの縁とみなすマスクの値 (前後 0.25 でなめらかにつなぐ)。自動のマスクは縁を元の絵から切り抜き直して
+                                                         輪郭線まで濃い値で入っているので真ん中でよい。低くすると、縁の外の薄い値の点がトゲのようにくっきり残る */
 static constexpr float DF_FOCUS_WINDOW    = 0.012f;  /* Focus Point のまわりで深度を調べる範囲 (画面の高さに対する半径) */
 static constexpr int   DF_STABILIZE_MAX   = 2;       /* 前後何フレームまで */
 static constexpr float DF_SNAP_SIGMA      = 0.08f;   /* 深度を線画に合わせるとき、色の近さの幅 */
@@ -440,7 +441,7 @@ DF_HD DF_INL float dfStepDepth(float d, float mn, float mx, float w, float wm, f
 	float a;   /* 0: 遠い側 mn、1: 近い側 mx */
 	if (wm >= 0.5f && ts >= 0.f && w < 0.95f) {
 		/* キャラの縁: マスクで決める。キャラの中はキャラの深度の側、外はその反対の側 */
-		const float k = dfSmooth(0.f, 2.f * DF_STEP_MASK, w);
+		const float k = dfSmooth(DF_STEP_MASK - 0.25f, DF_STEP_MASK + 0.25f, w);
 		a = (fabsf(mx - ts) < fabsf(mn - ts)) ? k : 1.f - k;
 	} else {
 		a = dfSmooth(0.35f, 0.65f, (d - mn) / range);

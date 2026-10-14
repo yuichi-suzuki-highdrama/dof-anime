@@ -1055,8 +1055,8 @@ static void ProcessSubjectJob(AEGP_SuiteHandler &suites, AutoJob &job, std::vect
 		job.cacheDir = g_cfg.cache + L"\\" + job.shotKey;
 		/* 同じ点・コマ・種類なら同じマスク (キャッシュを使う) */
 		wchar_t tag[96];
-		/* マスクの作り方を変えたら名前の番号を上げる (2: 縁を線画に寄せる・穴を埋める、3: 縁の仕上げ方 (subject_matte) を名前に入れる) */
-		swprintf(tag, 96, L"subjects3_%d_%d_f%ld_t%d_%ls", (int)std::lround(job.pointX), (int)std::lround(job.pointY),
+		/* マスクの作り方を変えたら名前の番号を上げる (2: 縁を線画に寄せる・穴を埋める、3: 縁の仕上げ方 (subject_matte) を名前に入れる、4: 追跡した全コマを詰め直し、縁の薄い値を消す) */
+		swprintf(tag, 96, L"subjects4_%d_%d_f%ld_t%d_%ls", (int)std::lround(job.pointX), (int)std::lround(job.pointY),
 		         (long)job.promptFrame, job.subjectType, g_cfg.subjectMatte.c_str());
 		job.subjectDir = job.cacheDir + L"\\" + tag;
 		AutoLog(L"subject: " + job.subjectDir);
@@ -1231,9 +1231,9 @@ static void ProcessPromptJob(AEGP_SuiteHandler &suites, AutoJob &job, std::vecto
 		/* 同じ文字・点・コマなら同じマスク (キャッシュを使う) */
 		wchar_t tag[128];
 		if (job.promptAtPoint)
-			swprintf(tag, 128, L"prompt1_%08x_%d_%d_f%ld", TextHash(job.promptText), (int)std::lround(job.pointX), (int)std::lround(job.pointY), (long)job.promptFrame);
+			swprintf(tag, 128, L"prompt2_%08x_%d_%d_f%ld", TextHash(job.promptText), (int)std::lround(job.pointX), (int)std::lround(job.pointY), (long)job.promptFrame);
 		else
-			swprintf(tag, 128, L"prompt1_%08x_all_f%ld", TextHash(job.promptText), (long)job.promptFrame);
+			swprintf(tag, 128, L"prompt2_%08x_all_f%ld", TextHash(job.promptText), (long)job.promptFrame);
 		job.subjectDir = job.cacheDir + L"\\" + tag;
 		AutoLog(L"prompt: " + job.promptText + L" -> " + job.subjectDir);
 		if (FileExists(job.subjectDir + L"\\manifest.json")) {

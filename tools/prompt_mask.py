@@ -8,7 +8,7 @@ prompt_mask.py - 文字で指定した物のマスクを、動画全体につい
 手順:
   1. --frame のコマで、--text の文字 (カンマで区切れば複数) に当たる物を SAM 3.1 で探す。
      --point (素材の画素) を渡せば、その点を含む物 (無ければいちばん近い物) を 1 つだけ。渡さなければ見つかった物を全部 (MAX_OBJECTS まで)
-  2. 物ごとに別々に動画全体を追いかける (SAM 3.1 の動画の追跡)
+  2. 物ごとに別々に動画全体を追いかけ (SAM 3.1 の動画の追跡)、各コマのマスクを SAM の細かい段で詰め直す
   3. 物を合わせて 1 枚のマスクにし、穴と切れ端を片付け、縁を元の絵の色から切り抜き直す (クローズドフォーム・マッティング)
   4. 1 コマずつ prompt.%05d.png に書く。RGBA の PNG で、色は白、アルファがマスク。
      DoF Anime の Sharp Layer / Blur Layer はアルファを読む
@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # -I で動かしても subject_mask を読めるように
-from subject_mask import refine_mask, clean_binary, cf_matte, load_frames, track_objects, write_json  # noqa: E402
+from subject_mask import refine_mask, refine_tracked, clean_binary, cf_matte, load_frames, track_objects, write_json  # noqa: E402
 
 MAX_OBJECTS = 16  # 点を渡さないときに追いかける物の数の上限
 
@@ -127,7 +127,9 @@ def main():
             result[k, :, :, s] = (masks[s].float() * 255 + 0.5).byte().cpu().numpy()
         init = torch.stack(masks).float()[:, None]   # [S, 1, H, W]
         track_objects(sam, images, init, k, result, device, dtype, F, unpack_masks,
-                      lambda v: write_json(status, {"state": "running", "pid": os.getpid(), "stage": "track", "progress": 0.05 + 0.85 * v}))
+                      lambda v: write_json(status, {"state": "running", "pid": os.getpid(), "stage": "track", "progress": 0.05 + 0.55 * v}))
+        refine_tracked(sam, images, result, k, device, dtype, F, comfy.utils,
+                       lambda v: write_json(status, {"state": "running", "pid": os.getpid(), "stage": "refine", "progress": 0.6 + 0.3 * v}))
 
         # --- 3. 合わせて 1 枚にし、仕上げて書き出す ---
         write_json(status, {"state": "running", "pid": os.getpid(), "stage": "clean", "progress": 0.92})
