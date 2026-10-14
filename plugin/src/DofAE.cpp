@@ -450,8 +450,10 @@ static PF_Err ParamsSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef 
 	PF_ADD_FLOAT_SLIDERX("Blur Size", 0.f, 160.f, 0.f, 80.f, DEF_BLUR_SIZE,
 		PF_Precision_TENTHS, PF_ValueDisplayFlag_PIXEL, 0, ID_BLUR_SIZE);
 
+	/* 手前のぼけの倍率。既定は 0 (ピントより手前はぼかさず、奥だけぼかす)。手前の物が大きくぼけて広がる所は、
+	   裏の背景が元の絵に無く境目も崩れやすいので、手前ボケが欲しいカットだけ上げる */
 	AEFX_CLR_STRUCT(def);
-	PF_ADD_FLOAT_SLIDERX("Near Blur", 0.f, 3.f, 0.f, 2.f, 1.f,
+	PF_ADD_FLOAT_SLIDERX("Near Blur", 0.f, 3.f, 0.f, 2.f, 0.f,
 		PF_Precision_HUNDREDTHS, PF_ValueDisplayFlag_NONE, 0, ID_NEAR_BLUR);
 
 	AEFX_CLR_STRUCT(def);
@@ -736,7 +738,7 @@ static PF_Err ReadDofParams(PF_InData *in_data, DofParams &p)
 	p.subjectAmount  = dfSat(r.fs(DOF_SUBJECT_AMOUNT, 0.f) / 100.f);
 	p.subjectFlatten = dfSat(r.fs(DOF_SUBJECT_FLATTEN, 100.f) / 100.f);
 	p.blurSize    = dfMax(0.f, r.fs(DOF_BLUR_SIZE, DEF_BLUR_SIZE));
-	p.nearScale   = dfMax(0.f, r.fs(DOF_NEAR_BLUR, 1.f));
+	p.nearScale   = dfMax(0.f, r.fs(DOF_NEAR_BLUR, 0.f));
 	p.farScale    = dfMax(0.f, r.fs(DOF_FAR_BLUR, 1.f));
 	p.edgeExpand  = dfMax(0.f, r.fs(DOF_EDGE_EXPAND, DEF_EDGE_EXPAND));
 	p.shape       = (int)r.popup(DOF_SHAPE, SHAPE_CIRCLE);

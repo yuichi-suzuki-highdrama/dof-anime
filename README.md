@@ -72,7 +72,7 @@ Output を Blur Map にすると、ぼけの大きさが見えます（手前 = 
 | | Keep Subject Sharp | ピントに関係なく、マスクの中を必ずくっきり残す強さ（手前のぼけも重ねない）。既定は 0% |
 | | Auto Subject / Subject Type / Generate Subject | キャラのマスクを自動で作る（SAM 3.1 でキャラを見つけて動画全体で追いかけ、深度で大きな取りこぼし・拾いすぎを直し、縁を元の絵の色から切り抜き直す）。別のキャラにピントを移したら Generate Subject で作り直す。縁の仕上げ方は設定ファイル（%APPDATA%\SRLM\DoFAnime.ini）の `subject_matte` で変えられる: `depthcf`（既定）/ `cf`（深度を使わない）/ `sam2matting`（いちばんきれいだが**非商用**）/ `none` |
 | Blur | Blur Size | ピントから深度が 0.5 離れた所のぼけの半径（1080p でのピクセル数） |
-| | Near Blur / Far Blur | 手前 / 奥のぼけの倍率 |
+| | Near Blur / Far Blur | 手前 / 奥のぼけの倍率。Near Blur の既定は 0（手前はぼかさず奥だけ）。手前ボケが欲しいカットだけ上げる |
 | | Edge Expand | 手前の物の輪郭を広げる幅。推定した深度の境目より外にある輪郭線を、手前の物に入れる |
 | Bokeh | Shape / Rotation | 玉ぼけの形（円・六角形・八角形）と向き |
 | | Highlights / Highlight Threshold | 明るい所を玉ぼけにする強さと、し始める明るさ |
