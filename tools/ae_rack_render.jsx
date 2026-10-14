@@ -30,7 +30,7 @@
         var fx = layer.property("ADBE Effect Parade").property("DoF Anime");
         log("Depth Layer = " + fx.property("Depth Layer").value + ", Subject Layer = " + fx.property("Subject Layer").value +
             ", Subject Channel = " + fx.property("Subject Channel").value);
-        fx.property("Blur Size").setValue(35);
+        fx.property("Blur Size").setValue(18);
         fx.property("Focus Pull Time").setValue(0.8);   /* 映画のフォーカス送りのように 0.8 秒かけて移す */
 
         var fp = fx.property("Focus Point");
