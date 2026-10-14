@@ -8,16 +8,21 @@ subject_mask.py - ピントを合わせるキャラのマスクを、動画全�
 手順:
   1. --frame のコマで、--text の文字でキャラを全員検出する (SAM 3.1)。--point (Focus Point、素材の画素) を含むキャラを 1 人目にし、
      残りは点に近い順に 3 人まで。文字で見つからなければ、点だけで 1 人分のマスクを作る
-  2. そのマスクから、キャラごとに別々に動画の後ろへ追いかける (SAM 3.1 の動画の追跡)。--frame が 0 でなければ、前へも逆順に追いかける
+  2. そのマスクから、キャラごとに別々に動画全体を追いかける。--matte sam2matting (既定) なら SAM2Matting (SAM3 版) で、
+     元の絵に合わせた切り抜き (髪の毛先・輪郭線まで、半透明の縁つき) にしながら追いかける。手前にある草や花はキャラから外れる。
+     --matte none なら SAM 3.1 の動画の追跡。--frame が 0 でなければ、前へも逆順に追いかける
   3. 1 コマずつ subject.%05d.png に書く。RGB の PNG で、赤 = 1 人目、緑 = 2 人目、青 = 3 人目のマスク (白 = キャラ)。
      DoF Anime は Subject Channel = Multi (RGB) で読み、キャラごとに自分の代表の深度へ寄せる。
   素材は動画でも静止画 (png / jpg / webp など) でもよい。
   マスクは仕上げに、(a) 検出したマスクを SAM の細かい段 (1008 画素、キャラの周りを切り出して) で詰め直し、
-  (b) キャラの内側の小さな穴を埋めて小さな切れ端を消し、(c) 元の絵をガイドにしたガイデッドフィルタで縁を線画に寄せる。
+  (b) キャラの内側の小さな穴を埋めて小さな切れ端を消す。縁は、SAM2Matting なら縁の数画素だけ切り抜きの半透明の値を残し
+  (迷った所のぼやけたシミは消える)、SAM 3.1 なら元の絵をガイドにしたガイデッドフィルタで線画に寄せる。
 
 SAM 3.1 は ComfyUI に入っている実装と重み (models/checkpoints/sam3.1_multiplex_fp16.safetensors) を、
 ComfyUI を立ち上げずに部品として使う。ComfyUI の Python (python_embeded) で動かすこと。
 SAM 3 は Meta の SAM License (https://github.com/facebookresearch/sam3/blob/main/LICENSE)。
+SAM2Matting は ComfyUI-SAM2Matting (custom_nodes) の実装と重み (models/sam2matting/SAM2Matting-SAM3.pt) を使う。
+SAM2Matting は CC BY-NC 4.0 (営利目的では使えない)。営利の仕事では --matte none にすること。
 
 進み具合は --status (status.json) に書く (DoF Anime の進み具合の窓が読む)。終わったら manifest.json を書く。
 """
@@ -88,6 +93,54 @@ def clean_mask(m_u8, guide_u8, cv2, np):
     return (t * 255.0 + 0.5).astype(np.uint8)
 
 
+def clean_matte(m_u8, cv2, np, band=2.5):
+    """SAM2Matting の 1 人分の切り抜き (0..255) を仕上げる: 一度 2 値にして小さな切れ端を消し、内側の小さな穴を埋め、
+    縁から band 画素の中だけ切り抜きの半透明の値を戻す (毛先や縁のなめらかさは残し、迷った所の広いシミは消える)"""
+    H, W = m_u8.shape
+    b = (m_u8 >= 128).astype(np.uint8)
+    area = int(b.sum())
+    if area < 64:
+        return m_u8
+    n, lab, stats, _ = cv2.connectedComponentsWithStats(b, connectivity=8)
+    for c in range(1, n):
+        if stats[c, cv2.CC_STAT_AREA] < area * 0.005:
+            b[lab == c] = 0
+    n, lab, stats, _ = cv2.connectedComponentsWithStats(1 - b, connectivity=4)
+    for c in range(1, n):
+        x, y, w, h, a = stats[c]
+        if not (x == 0 or y == 0 or x + w >= W or y + h >= H) and a < area * 0.002:
+            b[lab == c] = 1
+    d = np.where(b > 0, cv2.distanceTransform(b, cv2.DIST_L2, 3), cv2.distanceTransform(1 - b, cv2.DIST_L2, 3))
+    near = np.clip(1.0 - (d - band) / 1.5, 0.0, 1.0)
+    out = near * (m_u8.astype(np.float32) / 255.0) + (1.0 - near) * b.astype(np.float32)
+    return (out * 255.0 + 0.5).astype(np.uint8)
+
+
+def matte_subjects(comfy_root, images, masks, k, result, report):
+    """SAM2Matting (SAM3 版) で、キャラごとに k コマ目のマスクから動画全体を切り抜く。result[i, :, :, s] に 0..255 で書く。
+    report(s, done, total): 進み具合。使えなければ False を返す"""
+    import torch
+    node_dir = Path(comfy_root) / "custom_nodes" / "ComfyUI-SAM2Matting"
+    ckpt = Path(comfy_root) / "models" / "sam2matting" / "SAM2Matting-SAM3.pt"
+    if not (node_dir / "video_model.py").is_file() or not ckpt.is_file() or not torch.cuda.is_available():
+        print(f"matte: SAM2Matting not available ({node_dir}, {ckpt})", flush=True)
+        return False
+    sys.path.insert(0, str(node_dir))
+    import video_model as vm
+    model = vm.SAM2MattingVideoModel("sam3", ckpt, "cuda")
+    N, H, W = int(images.shape[0]), int(images.shape[1]), int(images.shape[2])
+    # コマは使うときに 1 枚ずつ縮める (動画全体を GPU に載せない)
+    frames = vm._prepare_frames(images, int(model.predictor.image_size), model.kind, model.device, True)
+    for s, m in enumerate(masks):
+        def keep(i, alpha, s=s):
+            result[i, :, :, s] = (alpha.float().clamp(0, 1) * 255 + 0.5).byte().cpu().numpy()
+        model.matte_frame_sequence(frames, H, W, m.float().cpu(), mask_frame=k, alpha_callback=keep,
+                                   progress_callback=lambda done, total, s=s: report(s, done, total))
+    del model
+    torch.cuda.empty_cache()
+    return True
+
+
 def write_json(path, obj, must=False):
     """書いてから差し替える。DoF Anime の進み具合の窓が同じときに読んでいると差し替えに失敗するので、
     少し待って何度か試す。進み具合 (must=False) なら、それでもだめなら今回は書かない"""
@@ -117,6 +170,8 @@ def main():
     ap.add_argument("--comfyui", default=r"C:\ComfyUI_windows_portable\ComfyUI")
     ap.add_argument("--ckpt", default="")
     ap.add_argument("--status", default="")
+    ap.add_argument("--matte", default="sam2matting", choices=["sam2matting", "none"],
+                    help="sam2matting: SAM2Matting で切り抜く (CC BY-NC 4.0)。none: SAM 3.1 の追跡だけ")
     a = ap.parse_args()
 
     out = Path(a.out_dir)
@@ -225,6 +280,24 @@ def main():
         for s in range(S):
             result[k, :, :, s] = (masks[s].float() * 255 + 0.5).byte().cpu().numpy()
         done = [0]
+        matted = False
+        if a.matte == "sam2matting":
+            # SAM 3.1 を GPU から下ろしてから (メモリが足りなくならないよう)、SAM2Matting で切り抜く
+            masks = [m.cpu() for m in masks]
+            del sam, model, clip, frame, r
+            comfy.model_management.unload_all_models()
+            comfy.model_management.soft_empty_cache()
+            write_json(status, {"state": "running", "pid": os.getpid(), "stage": "matte", "progress": 0.05})
+
+            def report(s, d, total):
+                write_json(status, {"state": "running", "pid": os.getpid(), "stage": "matte",
+                                    "progress": 0.05 + 0.9 * min(1.0, (s + d / max(1, total)) / S)})
+            matted = matte_subjects(a.comfyui, images, masks, k, result, report)
+            if matted:
+                how += ", matte sam2matting"
+            else:
+                raise RuntimeError("SAM2Matting を使えません (ComfyUI-SAM2Matting と models/sam2matting/SAM2Matting-SAM3.pt を確かめるか、"
+                                   "設定の subject_matte=none で SAM 3.1 だけにしてください)")
 
         def track(order):
             if len(order) < 2:
@@ -253,23 +326,32 @@ def main():
                     m = F.interpolate(m, size=(H, W), mode="bilinear", align_corners=False)[0, 0]
                     result[order[j], :, :, s] = (m.clamp(0, 1) * 255 + 0.5).byte().cpu().numpy()
 
-        track(list(range(k, N)))
-        if k > 0:
-            track(list(range(k, -1, -1)))
+        if not matted:
+            track(list(range(k, N)))
+            if k > 0:
+                track(list(range(k, -1, -1)))
 
-        # --- 3. 仕上げ: 穴を埋め、縁を元の絵の線画に寄せる (コマごと、キャラごと) ---
+        # --- 3. 仕上げ: 穴を埋め、切れ端を消し、縁を整える (コマごと、キャラごと) ---
         write_json(status, {"state": "running", "pid": os.getpid(), "stage": "clean", "progress": 0.95})
         for i in range(N):
-            guide = (images[i].numpy() * 255.0 + 0.5).astype(np.uint8)
-            for s_ in range(S):
-                result[i, :, :, s_] = clean_mask(result[i, :, :, s_], guide, cv2, np)
+            if matted:
+                for s_ in range(S):
+                    result[i, :, :, s_] = clean_matte(result[i, :, :, s_], cv2, np)
+                # キャラどうしが重なった所は、合わせて 1 を超えないようにする
+                tot = result[i].astype(np.float32).sum(axis=2, keepdims=True)
+                if float(tot.max()) > 255.0:
+                    result[i] = np.where(tot > 255.0, result[i] * (255.0 / np.maximum(tot, 1.0)) + 0.5, result[i]).astype(np.uint8)
+            else:
+                guide = (images[i].numpy() * 255.0 + 0.5).astype(np.uint8)
+                for s_ in range(S):
+                    result[i, :, :, s_] = clean_mask(result[i, :, :, s_], guide, cv2, np)
 
         # --- 4. 書き出す (RGB の PNG。OpenCV は BGR の順で書くので並べ替える) ---
         write_json(status, {"state": "running", "pid": os.getpid(), "stage": "write", "progress": 0.97})
         for i in range(N):
             cv2.imwrite(str(out / f"subject.{i + 1:05d}.png"), result[i][:, :, ::-1])
         write_json(out / "manifest.json", {
-            "generator": "subject_mask.py", "model": "sam3.1_multiplex", "text": a.text,
+            "generator": "subject_mask.py", "model": "sam3.1_multiplex" + (" + sam2matting_sam3" if matted else ""), "text": a.text,
             "point": [px, py], "frame": k, "start": how, "subjects": S, "channels": "R,G,B = subject 1,2,3",
             "frames": N, "size": [W, H], "fps": fps,
             "file": "subject.%05d.png", "seconds": round(time.time() - t0, 1)}, must=True)

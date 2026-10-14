@@ -53,7 +53,7 @@ To override settings for DoF Anime only, put key=value lines in `%APPDATA%\SRLM\
 2. Depth is generated and wired as a hidden "DoF depth" layer (instantly if cached).
 3. Drag the "Focus" frame in the Composition panel to what should be sharp.
 4. Set the amount with Blur Size; adjust near and far separately with Near Blur / Far Blur.
-5. A character matte is generated automatically and wired to Subject Layer (Auto Subject; you can also pick a cut-out such as a Roto Brush layer yourself). Estimated depth varies within a character (hair tips, legs, frills), so depth inside the matte is pulled towards the character's representative depth (Subject Flatten). Put the Focus Point on the character to bring the whole character into focus; move it to the background and the character blurs evenly. Keep Subject Sharp (0% by default) forces the matte to stay sharp wherever the focus is.
+5. A character matte is generated automatically and wired to Subject Layer (Auto Subject; you can also pick a cut-out such as a Roto Brush layer yourself). Estimated depth varies within a character (hair tips, legs, frills), so depth inside the matte is pulled towards the character's representative depth (Subject Flatten). Put the Focus Point on the character to bring the whole character into focus; move it to the background and the character blurs evenly. Keep Subject Sharp (0% by default) forces the matte to stay sharp wherever the focus is. The automatic matte finds characters with SAM 3.1 and cuts them out across the clip with SAM2Matting (down to hair tips; grass or props in front are left out). SAM2Matting is non-commercial, so for commercial work put `subject_matte=none` in %APPDATA%\SRLM\DoFAnime.ini to use SAM 3.1 only.
 
 Output = Blur Map shows the blur size (near = blue, far = orange, in focus = black). Focus Check tints the in-focus area green.
 
@@ -77,4 +77,4 @@ Output = Blur Map shows the blur size (near = blue, far = orange, in focus = bla
 
 ## Licence
 
-[MIT](LICENSE). Depth model: Video Depth Anything (Small is Apache-2.0; **Large is CC-BY-NC-4.0, non-commercial**, used by Remote Quality). The After Effects SDK is not included.
+[MIT](LICENSE). Depth model: Video Depth Anything (Small is Apache-2.0; **Large is CC-BY-NC-4.0, non-commercial**, used by Remote Quality). Character mattes: SAM 3.1 (Meta SAM License) and SAM2Matting (**CC BY-NC 4.0, non-commercial**; used from your ComfyUI-SAM2Matting install, not included here; disable with `subject_matte=none`). The After Effects SDK is not included.

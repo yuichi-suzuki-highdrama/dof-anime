@@ -63,6 +63,9 @@ struct AutoConfig {
 	std::wstring subjectPython = L"C:\\ComfyUI_windows_portable\\python_embeded\\python.exe";
 	std::wstring subjectScript = L"C:\\dev\\DepthOfFieldAEPlugin\\tools\\subject_mask.py";
 	std::wstring comfyuiDir    = L"C:\\ComfyUI_windows_portable\\ComfyUI";
+	/* キャラのマスクの切り抜き方: sam2matting (SAM2Matting で髪の毛先まで切り抜く。CC BY-NC 4.0 = 営利目的では使えない)
+	   / none (SAM 3.1 の追跡だけ)。設定の subject_matte で変える */
+	std::wstring subjectMatte  = L"sam2matting";
 	bool loaded = false;
 };
 
@@ -116,6 +119,7 @@ static void LoadIni(const std::wstring &ini)
 		else if (k == L"subject_python") g_cfg.subjectPython = v;
 		else if (k == L"subject_script") g_cfg.subjectScript = v;
 		else if (k == L"comfyui_dir") g_cfg.comfyuiDir = v;
+		else if (k == L"subject_matte") g_cfg.subjectMatte = (v == L"none") ? L"none" : L"sam2matting";
 	}
 }
 
@@ -1044,8 +1048,9 @@ static void ProcessSubjectJob(AEGP_SuiteHandler &suites, AutoJob &job, std::vect
 		job.cacheDir = g_cfg.cache + L"\\" + job.shotKey;
 		/* 同じ点・コマ・種類なら同じマスク (キャッシュを使う) */
 		wchar_t tag[96];
-		swprintf(tag, 96, L"subjects2_%d_%d_f%ld_t%d",  /* マスクの作り方を変えたら名前の番号を上げる (2: 縁を線画に寄せる・穴を埋める) */ (int)std::lround(job.pointX), (int)std::lround(job.pointY),
-		         (long)job.promptFrame, job.subjectType);
+		/* マスクの作り方を変えたら名前の番号を上げる (2: 縁を線画に寄せる・穴を埋める、3: 切り抜き方 (SAM2Matting か SAM 3.1 だけか) を名前に入れる) */
+		swprintf(tag, 96, L"subjects3_%d_%d_f%ld_t%d_%ls", (int)std::lround(job.pointX), (int)std::lround(job.pointY),
+		         (long)job.promptFrame, job.subjectType, g_cfg.subjectMatte == L"none" ? L"sam" : L"matte");
 		job.subjectDir = job.cacheDir + L"\\" + tag;
 		AutoLog(L"subject: " + job.subjectDir);
 		if (FileExists(job.subjectDir + L"\\manifest.json")) {
@@ -1068,7 +1073,8 @@ static void ProcessSubjectJob(AEGP_SuiteHandler &suites, AutoJob &job, std::vect
 				+ L" --point " + pt
 				+ L" --frame " + std::to_wstring((long)job.promptFrame)
 				+ L" --text \"" + SubjectText(job.subjectType) + L"\""
-				+ L" --comfyui \"" + g_cfg.comfyuiDir + L"\"";
+				+ L" --comfyui \"" + g_cfg.comfyuiDir + L"\""
+				+ L" --matte " + g_cfg.subjectMatte;
 			std::wstring err;
 			job.proc = SpawnCommand(cmd, job.subjectDir + L"\\gen.log", err);
 			if (!job.proc) { ReportInfo(suites, L"DoF Anime: " + err); return; }
