@@ -122,7 +122,8 @@ def clean_matte(m_u8, cv2, np, band=2.5):
 
 
 def clean_binary(m_u8, cv2, np):
-    """マスク (0..255) を 2 値にし、小さな切れ端 (本体の 0.5% 未満) を消し、内側の小さな穴 (2% 未満) を埋める"""
+    """マスク (0..255) を 2 値にし、小さな切れ端 (本体の 0.5% 未満) を消し、内側のごく小さな穴 (ノイズ) を埋める。
+    毛束のすき間のような細い穴は埋めない (すき間の向こうの背景はぼけるべき。縁の切り抜き直しが元の絵の色で決める)"""
     H, W = m_u8.shape
     b = (m_u8 >= 128)
     area = int(b.sum())
@@ -135,7 +136,7 @@ def clean_binary(m_u8, cv2, np):
     n, lab, stats, _ = cv2.connectedComponentsWithStats((~b).astype(np.uint8), connectivity=4)
     for c in range(1, n):
         x, y, w, h, ar = stats[c]
-        if not (x == 0 or y == 0 or x + w >= W or y + h >= H) and ar < area * 0.02:
+        if not (x == 0 or y == 0 or x + w >= W or y + h >= H) and ar < max(24, area * 0.0002):
             b[lab == c] = True
     return b.astype(np.uint8)
 

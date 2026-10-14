@@ -121,7 +121,8 @@ static constexpr float DF_FOCUS_SOFT      = 0.02f;   /* ピントの幅の外で
 static constexpr float DF_STEP_1080       = 8.f;     /* 深度の段差を締めるときに見るまわりの半径 (1080p でのピクセル数) */
 static constexpr float DF_STEP_LO         = 0.05f;   /* まわりの深度の幅がこれより小さければ段差ではない (なだらかな坂は締めない) */
 static constexpr float DF_STEP_HI         = 0.10f;   /* これより大きければ段差として締め切る */
-static constexpr float DF_STEP_MASK       = 0.5f;    /* キャラの縁とみなすマスクの値 (前後 0.25 でなめらかにつなぐ)。自動のマスクは縁を元の絵から切り抜き直して
+static constexpr float DF_STEP_NEAR_PENALTY = 0.02f; /* 段差の近くのキャラを選ぶとき、1 画素離れるごとにマスクの値から引く量 (いちばん近いキャラを選ぶ) */
+static constexpr float DF_STEP_MASK       = 0.5f;    /* キャラの縁とみなすマスクの値 (ここで決め切る)。自動のマスクは縁を元の絵から切り抜き直して
                                                          輪郭線まで濃い値で入っているので真ん中でよい。低くすると、縁の外の薄い値の点がトゲのようにくっきり残る */
 static constexpr float DF_FOCUS_WINDOW    = 0.012f;  /* Focus Point のまわりで深度を調べる範囲 (画面の高さに対する半径) */
 static constexpr int   DF_STABILIZE_MAX   = 2;       /* 前後何フレームまで */
@@ -425,7 +426,10 @@ DF_HD DF_INL void dfMinMax1D(const float *inMin, const float *inMax, const float
 		const size_t n = (size_t)yy * W + xx;
 		mn = dfMin(mn, inMin[n]);
 		mx = dfMax(mx, inMax[n]);
-		if (inW && inW[n] > wm) { wm = inW[n]; ts = inT[n]; }
+		/* まわりにキャラが 2 人いるとき、遠い方のキャラの深度を「近くのキャラ」にしないよう、離れるほど少し割り引く
+		   (縦横 2 回で、割り引きは |dx| + |dy| に比例する) */
+		const float sc = inW ? inW[n] - DF_STEP_NEAR_PENALTY * fabsf((float)k) : 0.f;
+		if (inW && sc > wm) { wm = sc; ts = inT[n]; }
 	}
 }
 
@@ -441,7 +445,9 @@ DF_HD DF_INL float dfStepDepth(float d, float mn, float mx, float w, float wm, f
 	float a;   /* 0: 遠い側 mn、1: 近い側 mx */
 	if (wm >= 0.5f && ts >= 0.f && w < 0.95f) {
 		/* キャラの縁: マスクで決める。キャラの中はキャラの深度の側、外はその反対の側 */
-		const float k = dfSmooth(DF_STEP_MASK - 0.25f, DF_STEP_MASK + 0.25f, w);
+		/* キャラの縁では中間の深度を作らない (中間だと縁のすぐ外の背景が少ししかぼけず、くっきりしたかけらが残る)。
+		   縁のなめらかさは、元の絵の線とマスクのなめらかな境目に任せる */
+		const float k = dfSmooth(DF_STEP_MASK - 0.05f, DF_STEP_MASK + 0.05f, w);
 		a = (fabsf(mx - ts) < fabsf(mn - ts)) ? k : 1.f - k;
 	} else {
 		a = dfSmooth(0.35f, 0.65f, (d - mn) / range);
