@@ -462,8 +462,13 @@ static PF_Err ParamsSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef 
 	   Sharp Layer の所は必ずくっきり、Blur Layer の所は周りの奥の深度でぼかす */
 	AEFX_CLR_STRUCT(def);
 	PF_ADD_LAYER("Sharp Layer", PF_LayerDefault_NONE, ID_SHARP_LAYER);
+	/* 文字 (英語) で物を探して、Sharp Layer / Blur Layer のマスクを動画全体について作る (SAM 3.1、tools/prompt_mask.py) */
+	AEFX_CLR_STRUCT(def);
+	PF_ADD_BUTTON("Sharp by Text", "Text...", 0, PF_ParamFlag_SUPERVISE, ID_SHARP_PROMPT);
 	AEFX_CLR_STRUCT(def);
 	PF_ADD_LAYER("Blur Layer", PF_LayerDefault_NONE, ID_BLUR_LAYER);
+	AEFX_CLR_STRUCT(def);
+	PF_ADD_BUTTON("Blur by Text", "Text...", 0, PF_ParamFlag_SUPERVISE, ID_BLUR_PROMPT);
 
 	AEFX_CLR_STRUCT(def);
 	PF_END_TOPIC(ID_TOPIC_FOCUS_END);
@@ -1295,6 +1300,8 @@ PF_Err EffectMain(
 				Auto_Request(in_data, true, (int)params[DOF_AUTO_ENGINE]->u.pd.value);
 			} else if (uc->param_index == DOF_SUBJECT_GENERATE) {
 				Auto_RequestSubject(in_data, true);
+			} else if (uc->param_index == DOF_SHARP_PROMPT || uc->param_index == DOF_BLUR_PROMPT) {
+				Auto_PromptButton(in_data, uc->param_index == DOF_SHARP_PROMPT ? 0 : 1);
 			} else if (uc->param_index == DOF_AUTO_CLEAN) {
 				Auto_CleanCache(in_data);
 			} else if (uc->param_index == DOF_FOCUS_MODE) {

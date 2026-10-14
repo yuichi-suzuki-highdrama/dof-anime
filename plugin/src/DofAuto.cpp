@@ -196,6 +196,10 @@ struct AutoJob {
 	double          pointX = 0.0, pointY = 0.0;   /* Focus Point (レイヤー座標 = 素材の画素) */
 	A_long          promptFrame = 0;               /* 点を見るコマ */
 	int             subjectType = 1;               /* 1: Anime Character  2: Person  3: Animal */
+	/* 文字のマスクのジョブ (promptKind >= 0。0 = Sharp Layer、1 = Blur Layer)。出力先は subjectDir */
+	int             promptKind = -1;
+	std::wstring    promptText;
+	bool            promptAtPoint = false;
 };
 
 /* 依頼を受けてから、プロジェクトを書き換え始めるまでの待ち時間 (ミリ秒)。
@@ -1110,6 +1114,181 @@ static void ProcessSubjectJob(AEGP_SuiteHandler &suites, AutoJob &job, std::vect
 }
 
 /* ------------------------------------------------------------------ */
+/* 文字のマスク (Sharp Layer / Blur Layer) の生成                         */
+/* ------------------------------------------------------------------ */
+
+static const wchar_t *PromptLayerParam(int kind) { return kind == 0 ? L"Sharp Layer" : L"Blur Layer"; }
+static const wchar_t *PromptLayerName(int kind) { return kind == 0 ? L"DoF sharp" : L"DoF blur"; }
+
+/* 文字のマスクのスクリプト: キャラのマスクのスクリプトと同じフォルダの prompt_mask.py */
+static std::wstring PromptScript()
+{
+	std::wstring s = g_cfg.subjectScript;
+	const size_t p = s.find_last_of(L"\\/");
+	return (p == std::wstring::npos ? std::wstring() : s.substr(0, p + 1)) + L"prompt_mask.py";
+}
+
+/* 文字の短い指紋 (キャッシュの名前用。FNV-1a) */
+static unsigned int TextHash(const std::wstring &t)
+{
+	unsigned int h = 2166136261u;
+	for (wchar_t c : t) { h ^= (unsigned int)towlower(c); h *= 16777619u; }
+	return h;
+}
+
+/* このレイヤーの本エフェクトを集める */
+static void CollectOurEffects(AEGP_SuiteHandler &suites, AEGP_LayerH layerH, std::vector<AEGP_EffectRefH> &out)
+{
+	A_long n = 0;
+	if (suites.EffectSuite4()->AEGP_GetLayerNumEffects(layerH, &n) != A_Err_NONE) return;
+	for (A_long i = 0; i < n; ++i) {
+		AEGP_EffectRefH eH = NULL;
+		if (suites.EffectSuite4()->AEGP_GetLayerEffectByIndex(g_pluginId, layerH, i, &eH) != A_Err_NONE || !eH) continue;
+		if (EffectIsOurs(suites, eH)) out.push_back(eH);
+		else suites.EffectSuite4()->AEGP_DisposeEffect(eH);
+	}
+}
+
+/* 読み込んで Sharp Layer / Blur Layer に結線する (前に作った同じ種類のレイヤーは消す) */
+static bool ImportPrompt(AEGP_SuiteHandler &suites, AutoJob &job, std::wstring &err)
+{
+	AEGP_LayerH srcLayerH = NULL;
+	if (suites.LayerSuite9()->AEGP_GetLayerFromLayerID(job.compH, job.layerId, &srcLayerH) != A_Err_NONE || !srcLayerH) {
+		err = L"対象レイヤーが見つかりません (削除された可能性)";
+		return false;
+	}
+	std::vector<AEGP_EffectRefH> effects;
+	CollectOurEffects(suites, srcLayerH, effects);
+	if (effects.empty()) return true;
+	const wchar_t *param = PromptLayerParam(job.promptKind);
+	std::vector<AEGP_LayerIDVal> oldIds;
+	for (AEGP_EffectRefH eH : effects) {
+		AEGP_LayerIDVal id = GetStreamLayerId(suites, eH, param);
+		if (id) oldIds.push_back(id);
+	}
+	suites.UtilitySuite6()->AEGP_StartUndoGroup("DoF Anime: Text Mask");
+	const std::wstring first = job.subjectDir + L"\\prompt.00001.png";
+	AEGP_LayerH maskL = FindLayerWithSource(suites, job.compH, first);
+	if (!maskL) maskL = AddPassLayer(suites, job, srcLayerH, first, PromptLayerName(job.promptKind), err);
+	bool ok = maskL != NULL;
+	AEGP_LayerIDVal maskId = 0;
+	if (ok) {
+		suites.LayerSuite9()->AEGP_GetLayerID(maskL, &maskId);
+		for (AEGP_EffectRefH eH : effects) SetStreamLayerId(suites, eH, param, maskId);
+		for (AEGP_LayerIDVal id : oldIds) {
+			if (id == maskId) continue;
+			AEGP_LayerH oldL = NULL;
+			if (suites.LayerSuite9()->AEGP_GetLayerFromLayerID(job.compH, id, &oldL) != A_Err_NONE || !oldL) continue;
+			AEGP_MemHandle nameH = NULL;
+			std::wstring name;
+			if (suites.LayerSuite9()->AEGP_GetLayerName(g_pluginId, oldL, &nameH, NULL) == A_Err_NONE)
+				name = MemHandleToWString(suites, nameH);
+			if (name == PromptLayerName(job.promptKind)) {   /* 自分で作ったものだけ消す (手で描いた平面は残す) */
+				suites.LayerSuite9()->AEGP_DeleteLayer(oldL);
+				AutoLog(L"prompt: removed old layer");
+			}
+		}
+	}
+	suites.UtilitySuite6()->AEGP_EndUndoGroup();
+	for (AEGP_EffectRefH eH : effects) suites.EffectSuite4()->AEGP_DisposeEffect(eH);
+	return ok;
+}
+
+/* 文字のマスクのジョブを 1 段階進める。続けるなら keep に戻す */
+static void ProcessPromptJob(AEGP_SuiteHandler &suites, AutoJob &job, std::vector<AutoJob> &keep)
+{
+	if (job.state == JOB_QUEUED) {
+		AEGP_LayerH layerH = NULL;
+		if (suites.LayerSuite9()->AEGP_GetLayerFromLayerID(job.compH, job.layerId, &layerH) != A_Err_NONE || !layerH) return;
+		std::vector<AEGP_EffectRefH> effects;
+		CollectOurEffects(suites, layerH, effects);
+		if (effects.empty()) return;
+		AEGP_ItemH compItem = NULL;
+		A_Time compT = {0, 1}, layerT = {0, 1};
+		if (suites.CompSuite11()->AEGP_GetItemFromComp(job.compH, &compItem) == A_Err_NONE && compItem)
+			suites.ItemSuite9()->AEGP_GetItemCurrentTime(compItem, &compT);
+		suites.LayerSuite9()->AEGP_ConvertCompToLayerTime(layerH, &compT, &layerT);
+		GetStreamPoint(suites, effects[0], L"Focus Point", layerT, job.pointX, job.pointY);
+		for (AEGP_EffectRefH eH : effects) suites.EffectSuite4()->AEGP_DisposeEffect(eH);
+
+		job.srcPath = GetLayerSourcePath(suites, layerH, job.isStill);
+		if (job.srcPath.empty()) {
+			ReportInfo(suites, L"DoF Anime: このレイヤーのソースがファイルではないため、文字のマスクを作れません。");
+			return;
+		}
+		AEGP_ItemH itemH = NULL;
+		if (suites.LayerSuite9()->AEGP_GetLayerSourceItem(layerH, &itemH) == A_Err_NONE && itemH) {
+			AEGP_FootageInterp interp;
+			AEFX_CLR_STRUCT(interp);
+			if (suites.FootageSuite5()->AEGP_GetFootageInterpretation(itemH, FALSE, &interp) == A_Err_NONE)
+				job.fps = interp.conform_fpsF > 0 ? interp.conform_fpsF : (interp.native_fpsF > 0 ? interp.native_fpsF : 24.0);
+		}
+		const double sec = layerT.scale ? (double)layerT.value / (double)layerT.scale : 0.0;
+		job.promptFrame = job.isStill ? 0 : std::max<A_long>(0, (A_long)std::llround(sec * job.fps));
+		LoadConfig();
+		job.shotKey = MakeShotKey(job.srcPath);
+		job.cacheDir = g_cfg.cache + L"\\" + job.shotKey;
+		/* 同じ文字・点・コマなら同じマスク (キャッシュを使う) */
+		wchar_t tag[128];
+		if (job.promptAtPoint)
+			swprintf(tag, 128, L"prompt1_%08x_%d_%d_f%ld", TextHash(job.promptText), (int)std::lround(job.pointX), (int)std::lround(job.pointY), (long)job.promptFrame);
+		else
+			swprintf(tag, 128, L"prompt1_%08x_all_f%ld", TextHash(job.promptText), (long)job.promptFrame);
+		job.subjectDir = job.cacheDir + L"\\" + tag;
+		AutoLog(L"prompt: " + job.promptText + L" -> " + job.subjectDir);
+		if (FileExists(job.subjectDir + L"\\manifest.json")) {
+			job.state = JOB_IMPORTING;
+		} else {
+			const std::wstring script = PromptScript();
+			if (!FileExists(script) || !FileExists(g_cfg.subjectPython)) {
+				ReportInfo(suites, L"DoF Anime: 文字のマスクを作る準備がありません (SAM 3.1 を動かす Python と " + script + L")。");
+				return;
+			}
+			CreateDirectoryW(g_cfg.cache.c_str(), NULL);
+			CreateDirectoryW(job.cacheDir.c_str(), NULL);
+			CreateDirectoryW(job.subjectDir.c_str(), NULL);
+			std::wstring cmd = L"\"" + g_cfg.subjectPython + L"\" -I \"" + script + L"\""
+				+ L" --video \"" + job.srcPath + L"\""
+				+ L" --out-dir \"" + job.subjectDir + L"\""
+				+ L" --text \"" + job.promptText + L"\""
+				+ L" --frame " + std::to_wstring((long)job.promptFrame)
+				+ L" --comfyui \"" + g_cfg.comfyuiDir + L"\"";
+			if (job.promptAtPoint) {
+				wchar_t pt[64];
+				swprintf(pt, 64, L" --point %.1f,%.1f", job.pointX, job.pointY);
+				cmd += pt;
+			}
+			std::wstring err;
+			job.proc = SpawnCommand(cmd, job.subjectDir + L"\\gen.log", err);
+			if (!job.proc) { ReportInfo(suites, L"DoF Anime: " + err); return; }
+			job.state = JOB_RUNNING;
+			keep.push_back(job);
+			return;
+		}
+	}
+	if (job.state == JOB_RUNNING) {
+		if (WaitForSingleObject(job.proc, 0) != WAIT_OBJECT_0) { keep.push_back(job); return; }
+		DWORD code = 1;
+		GetExitCodeProcess(job.proc, &code);
+		CloseHandle(job.proc);
+		job.proc = NULL;
+		AutoLog(L"prompt: exited code=" + std::to_wstring((long)code));
+		if (code != 0 || !FileExists(job.subjectDir + L"\\manifest.json")) {
+			std::wstring msg = JsonValue(ReadTextFile(job.subjectDir + L"\\status.json"), L"message");
+			ReportInfo(suites, L"DoF Anime: 文字のマスクを作れませんでした。\n" + msg + L"\n詳細: " + job.subjectDir + L"\\gen.log");
+			return;
+		}
+		job.state = JOB_IMPORTING;
+	}
+	if (job.state == JOB_IMPORTING) {
+		std::wstring err;
+		const bool ok = ImportPrompt(suites, job, err);
+		AutoLog(L"prompt: import " + std::wstring(ok ? L"ok" : L"failed: ") + err);
+		if (!ok) ReportInfo(suites, L"DoF Anime: 文字のマスクの読み込みに失敗しました。\n" + err);
+	}
+}
+
+/* ------------------------------------------------------------------ */
 /* アイドルフック                                                       */
 /* ------------------------------------------------------------------ */
 
@@ -1137,6 +1316,7 @@ static void ProcessJobs()
 	for (AutoJob &job : jobs) {
 		try {
 			if (job.state == JOB_QUEUED && GetTickCount() - job.queuedTick < QUEUE_DELAY_MS) { keep.push_back(job); continue; }
+			if (job.promptKind >= 0) { ProcessPromptJob(suites, job, keep); continue; }
 			if (job.subject) { ProcessSubjectJob(suites, job, keep); continue; }
 			if (job.state == JOB_QUEUED) {
 				AEGP_LayerH layerH = NULL;
@@ -1447,7 +1627,12 @@ static void UpdateProgress()
 		for (const AutoJob &j : g_jobs) {
 			if (j.state != JOB_EXTRACTING && j.state != JOB_RUNNING && j.state != JOB_IMPORTING) continue;
 			if (++active > 1) continue;
-			if (j.subject) {
+			if (j.promptKind >= 0) {
+				std::wstring st = ReadTextFile(j.subjectDir + L"\\status.json");
+				float p = (float)_wtof(JsonValue(st, L"progress").c_str());
+				value = j.state == JOB_RUNNING ? std::max(0.f, std::min(1.f, p)) : 0.99f;
+				text = j.state == JOB_RUNNING ? L"文字のマスクを作成中 (" + j.promptText + L")" : L"マスクを結線中";
+			} else if (j.subject) {
 				std::wstring st = ReadTextFile(j.subjectDir + L"\\status.json");
 				float p = (float)_wtof(JsonValue(st, L"progress").c_str());
 				value = j.state == JOB_RUNNING ? std::max(0.f, std::min(1.f, p)) : 0.99f;
@@ -1622,6 +1807,133 @@ void Auto_RequestSubject(PF_InData *in_data, bool force)
 	} catch (...) {
 		AutoLog(L"Auto_RequestSubject: exception");
 	}
+}
+
+void Auto_RequestPrompt(PF_InData *in_data, int kind, const std::wstring &text, bool atPoint)
+{
+	if (!g_hookRegistered) Auto_Init(in_data);
+	if (!g_hookRegistered) return;
+	try {
+		AEGP_SuiteHandler suites(in_data->pica_basicP);
+		AEGP_LayerH layerH = NULL;
+		if (suites.PFInterfaceSuite1()->AEGP_GetEffectLayer(in_data->effect_ref, &layerH) != A_Err_NONE || !layerH) return;
+		AEGP_CompH compH = NULL;
+		AEGP_LayerIDVal id = 0;
+		if (suites.LayerSuite9()->AEGP_GetLayerParentComp(layerH, &compH) != A_Err_NONE || !compH) return;
+		if (suites.LayerSuite9()->AEGP_GetLayerID(layerH, &id) != A_Err_NONE) return;
+		AutoJob job = MakeSubjectJob(compH, id, true);
+		job.subject = false;
+		job.promptKind = kind;
+		job.promptText = text;
+		job.promptAtPoint = atPoint;
+		std::lock_guard<std::mutex> lk(g_mtx);
+		for (const AutoJob &j : g_jobs)
+			if (j.layerId == id && j.promptKind == kind) { AutoLog(L"Auto_RequestPrompt: already in progress"); return; }
+		g_jobs.push_back(job);
+		AutoLog(L"Auto_RequestPrompt: queued kind=" + std::to_wstring(kind) + L" text=" + text);
+	} catch (...) {
+		AutoLog(L"Auto_RequestPrompt: exception");
+	}
+}
+
+/* 文字を入れる窓 (メモリの中で組み立てたダイアログ) */
+struct PromptDlgState {
+	int kind;
+	std::wstring text;
+	bool atPoint;
+};
+
+static INT_PTR CALLBACK PromptDlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+{
+	PromptDlgState *st = (PromptDlgState *)GetWindowLongPtrW(h, DWLP_USER);
+	switch (msg) {
+	case WM_INITDIALOG:
+		SetWindowLongPtrW(h, DWLP_USER, lp);
+		st = (PromptDlgState *)lp;
+		SetWindowTextW(h, st->kind == 0 ? L"DoF Anime: くっきり残す物 (Sharp Layer)" : L"DoF Anime: ぼかす物 (Blur Layer)");
+		SetDlgItemTextW(h, 101, st->text.c_str());
+		CheckDlgButton(h, 102, st->atPoint ? BST_CHECKED : BST_UNCHECKED);
+		SetFocus(GetDlgItem(h, 101));
+		SendDlgItemMessageW(h, 101, EM_SETSEL, 0, -1);
+		return FALSE;
+	case WM_COMMAND:
+		if (LOWORD(wp) == IDOK && st) {
+			wchar_t buf[512] = {0};
+			GetDlgItemTextW(h, 101, buf, 512);
+			std::wstring t = buf;
+			t.erase(std::remove(t.begin(), t.end(), L'"'), t.end());   /* 命令行を壊さない */
+			st->text = trim(t);
+			st->atPoint = IsDlgButtonChecked(h, 102) == BST_CHECKED;
+			EndDialog(h, st->text.empty() ? IDCANCEL : IDOK);
+			return TRUE;
+		}
+		if (LOWORD(wp) == IDCANCEL) { EndDialog(h, IDCANCEL); return TRUE; }
+		break;
+	}
+	return FALSE;
+}
+
+/* ダイアログの雛形をメモリに書く */
+static void DlgAlign(std::vector<WORD> &v) { if (v.size() % 2) v.push_back(0); }   /* DWORD 境界 */
+static void DlgStr(std::vector<WORD> &v, const wchar_t *s) { for (; *s; ++s) v.push_back((WORD)*s); v.push_back(0); }
+static void DlgItem(std::vector<WORD> &v, DWORD style, short x, short y, short cx, short cy, WORD id, WORD cls, const wchar_t *title)
+{
+	DlgAlign(v);
+	DLGITEMTEMPLATE it;
+	it.style = style | WS_CHILD | WS_VISIBLE;
+	it.dwExtendedStyle = 0;
+	it.x = x; it.y = y; it.cx = cx; it.cy = cy; it.id = id;
+	const WORD *p = (const WORD *)&it;
+	v.insert(v.end(), p, p + sizeof(it) / 2);
+	v.push_back(0xFFFF);
+	v.push_back(cls);
+	DlgStr(v, title);
+	v.push_back(0);   /* 作成データなし */
+}
+
+static bool AskPrompt(int kind, std::wstring &text, bool &atPoint)
+{
+	std::vector<WORD> v;
+	DLGTEMPLATE dt;
+	dt.style = DS_MODALFRAME | DS_CENTER | DS_SETFONT | WS_POPUP | WS_CAPTION | WS_SYSMENU;
+	dt.dwExtendedStyle = 0;
+	dt.cdit = 5;
+	dt.x = 0; dt.y = 0; dt.cx = 280; dt.cy = 100;
+	const WORD *p = (const WORD *)&dt;
+	v.insert(v.end(), p, p + sizeof(dt) / 2);
+	v.push_back(0);   /* メニューなし */
+	v.push_back(0);   /* 既定のクラス */
+	DlgStr(v, L"DoF Anime");
+	v.push_back(9);
+	DlgStr(v, L"Segoe UI");
+	DlgItem(v, SS_LEFT, 7, 7, 266, 26, 0xFFFF, 0x0082,
+	        kind == 0 ? L"くっきり残したい物の名前を英語で入れてください (カンマで区切れば複数)。\n例: flower, grass"
+	                  : L"ぼかしたい物の名前を英語で入れてください (カンマで区切れば複数)。\n例: window, bed");
+	DlgItem(v, WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL, 7, 36, 266, 14, 101, 0x0081, L"");
+	DlgItem(v, BS_AUTOCHECKBOX | WS_TABSTOP, 7, 56, 266, 12, 102, 0x0080, L"Focus Point の所の物を 1 つだけ (外すと見つかった物を全部)");
+	DlgItem(v, BS_DEFPUSHBUTTON | WS_TABSTOP, 165, 77, 50, 16, IDOK, 0x0080, L"作る");
+	DlgItem(v, BS_PUSHBUTTON | WS_TABSTOP, 223, 77, 50, 16, IDCANCEL, 0x0080, L"やめる");
+	HWND owner = NULL;
+	EnumWindows(FindAeMainProc, (LPARAM)&owner);
+	PromptDlgState st = {kind, text, atPoint};
+	const INT_PTR r = DialogBoxIndirectParamW(GetModuleHandleW(NULL), (LPCDLGTEMPLATEW)v.data(), owner, PromptDlgProc, (LPARAM)&st);
+	if (r != IDOK) return false;
+	text = st.text;
+	atPoint = st.atPoint;
+	return true;
+}
+
+void Auto_PromptButton(PF_InData *in_data, int kind)
+{
+	static std::wstring lastText[2];
+	static bool lastAtPoint[2] = {false, false};
+	const int k = kind == 0 ? 0 : 1;
+	std::wstring text = lastText[k];
+	bool atPoint = lastAtPoint[k];
+	if (!AskPrompt(k, text, atPoint)) return;
+	lastText[k] = text;
+	lastAtPoint[k] = atPoint;
+	Auto_RequestPrompt(in_data, k, text, atPoint);
 }
 
 /* ------------------------------------------------------------------ */

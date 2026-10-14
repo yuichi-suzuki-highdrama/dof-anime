@@ -50,7 +50,9 @@ enum {
 	DOF_SUBJECT_TYPE,         /* 1: Anime Character  2: Person  3: Animal */
 	DOF_SUBJECT_GENERATE,     /* ボタン: 今の Focus Point でマスクを作り直す */
 	DOF_SHARP_LAYER,          /* 手直し: このレイヤーのアルファの所は必ずくっきり */
-	DOF_BLUR_LAYER,           /* 手直し: このレイヤーのアルファの所は周りの奥の深度でぼかす */
+	DOF_SHARP_PROMPT,         /* ボタン: 文字で Sharp Layer のマスクを作る */
+	DOF_BLUR_LAYER,           /* 手直し: このレイヤーのアルファの所は画面のいちばん奥と同じだけぼかす */
+	DOF_BLUR_PROMPT,          /* ボタン: 文字で Blur Layer のマスクを作る */
 	DOF_TOPIC_FOCUS_END,
 
 	/* --- Blur --- */
@@ -113,6 +115,8 @@ enum {
 	ID_FOCUS_PULL,
 	ID_SHARP_LAYER,
 	ID_BLUR_LAYER,
+	ID_SHARP_PROMPT,
+	ID_BLUR_PROMPT,
 
 	ID_TOPIC_BLUR = 50,
 	ID_BLUR_SIZE,

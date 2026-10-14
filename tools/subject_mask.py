@@ -244,6 +244,67 @@ def matte_subjects(comfy_root, images, masks, k, result, report):
     return True
 
 
+def load_frames(path, np, cv2):
+    """動画 (または静止画) を読む。戻り値: (コマのリスト [H, W, 3] uint8 RGB, fps)。
+    Windows の日本語のパスでも読めるよう、静止画はバイト列から読む"""
+    fps = 24.0
+    frames = []
+    if Path(path).suffix.lower() in IMAGE_EXTS:
+        bgr = cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_COLOR)
+        if bgr is not None:
+            frames.append(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+    else:
+        cap = cv2.VideoCapture(path)
+        fps = cap.get(cv2.CAP_PROP_FPS) or 24.0
+        while True:
+            ok, bgr = cap.read()
+            if not ok:
+                break
+            frames.append(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+        cap.release()
+    if not frames:
+        raise RuntimeError("素材からコマを読めませんでした")
+    return frames, fps
+
+
+def track_objects(sam, images, init, k, result, device, dtype, F, unpack_masks, report):
+    """k コマ目のマスク init ([S, 1, H, W]) から、物ごとに別々に動画全体を追いかける (SAM 3.1 の動画の追跡。
+    後ろへ、k > 0 なら前へも逆順に)。result[i, :, :, s] に 0..255 で書く。report(0..1): 進み具合"""
+    import torch
+    N, H, W = int(images.shape[0]), int(images.shape[1]), int(images.shape[2])
+    S = int(init.shape[0])
+    done = [0]
+
+    def track(order):
+        if len(order) < 2:
+            return
+        imgs = images[order].movedim(-1, 1)   # [n, 3, H, W]
+
+        class Bar:
+            def update(self, v):
+                done[0] += v
+                report(min(1.0, done[0] / max(1, N + k)))
+
+            def update_absolute(self, v, total=None, preview=None):
+                pass
+        with torch.no_grad():
+            res = sam.forward_video(images=imgs, initial_masks=init.to(device=device, dtype=dtype),
+                                    pbar=Bar(), text_prompts=None, new_det_thresh=0.5, max_objects=S,
+                                    detect_interval=1, target_device=device, target_dtype=dtype)
+        packed = res["packed_masks"]
+        if packed is None:
+            return
+        for j in range(len(order)):
+            for s_ in range(min(S, packed.shape[1])):
+                m = unpack_masks(packed[j, s_]).float()[None, None]
+                m = F.interpolate(m, size=(H, W), mode="bilinear", align_corners=False)[0, 0]
+                result[order[j], :, :, s_] = (m.clamp(0, 1) * 255 + 0.5).byte().cpu().numpy()
+
+    track(list(range(k, N)))
+    if k > 0:
+        track(list(range(k, -1, -1)))
+
+
 def write_json(path, obj, must=False):
     """書いてから差し替える。DoF Anime の進み具合の窓が同じときに読んでいると差し替えに失敗するので、
     少し待って何度か試す。進み具合 (must=False) なら、それでもだめなら今回は書かない"""
@@ -300,25 +361,7 @@ def main():
     t0 = time.time()
     try:
         # --- 動画 (または静止画) を読む (素材の大きさのまま、0..1 の RGB) ---
-        fps = 24.0
-        frames = []
-        if Path(a.video).suffix.lower() in IMAGE_EXTS:
-            # 静止画。Windows の日本語のパスでも読めるよう、バイト列から読む
-            buf = np.fromfile(a.video, dtype=np.uint8)
-            bgr = cv2.imdecode(buf, cv2.IMREAD_COLOR)
-            if bgr is not None:
-                frames.append(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
-        else:
-            cap = cv2.VideoCapture(a.video)
-            fps = cap.get(cv2.CAP_PROP_FPS) or 24.0
-            while True:
-                ok, bgr = cap.read()
-                if not ok:
-                    break
-                frames.append(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
-            cap.release()
-        if not frames:
-            raise RuntimeError("素材からコマを読めませんでした")
+        frames, fps = load_frames(a.video, np, cv2)
         N = len(frames)
         H, W = frames[0].shape[:2]
         k = max(0, min(a.frame, N - 1))
@@ -384,7 +427,6 @@ def main():
         result = np.zeros((N, H, W, 3), np.uint8)   # R, G, B = 1 人目, 2 人目, 3 人目
         for s in range(S):
             result[k, :, :, s] = (masks[s].float() * 255 + 0.5).byte().cpu().numpy()
-        done = [0]
         matted = False
         if a.matte == "sam2matting":
             # SAM 3.1 を GPU から下ろしてから (メモリが足りなくならないよう)、SAM2Matting で切り抜く
@@ -404,37 +446,9 @@ def main():
                 raise RuntimeError("SAM2Matting を使えません (ComfyUI-SAM2Matting と models/sam2matting/SAM2Matting-SAM3.pt を確かめるか、"
                                    "設定の subject_matte=none で SAM 3.1 だけにしてください)")
 
-        def track(order):
-            if len(order) < 2:
-                return
-            imgs = images[order].movedim(-1, 1)   # [n, 3, H, W]
-            n = len(order)
-
-            class Bar:
-                def update(self, v):
-                    done[0] += v
-                    write_json(status, {"state": "running", "pid": os.getpid(), "stage": "track",
-                                        "progress": 0.05 + 0.9 * min(1.0, done[0] / max(1, N + k))})
-
-                def update_absolute(self, v, total=None, preview=None):
-                    pass
-            with torch.no_grad():
-                res = sam.forward_video(images=imgs, initial_masks=init.to(device=device, dtype=dtype),
-                                        pbar=Bar(), text_prompts=None, new_det_thresh=0.5, max_objects=S,
-                                        detect_interval=1, target_device=device, target_dtype=dtype)
-            packed = res["packed_masks"]
-            if packed is None:
-                return
-            for j in range(n):
-                for s in range(min(S, packed.shape[1])):
-                    m = unpack_masks(packed[j, s]).float()[None, None]
-                    m = F.interpolate(m, size=(H, W), mode="bilinear", align_corners=False)[0, 0]
-                    result[order[j], :, :, s] = (m.clamp(0, 1) * 255 + 0.5).byte().cpu().numpy()
-
         if not matted:
-            track(list(range(k, N)))
-            if k > 0:
-                track(list(range(k, -1, -1)))
+            track_objects(sam, images, init, k, result, device, dtype, F, unpack_masks,
+                          lambda v: write_json(status, {"state": "running", "pid": os.getpid(), "stage": "track", "progress": 0.05 + 0.9 * v}))
 
         # --- 3. 仕上げ: 穴を埋め、切れ端を消し、縁を整える (コマごと、キャラごと) ---
         depth_dir = a.depth_dir or str(out.parent / "depth")
