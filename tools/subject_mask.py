@@ -165,6 +165,8 @@ def depth_fix(b, depth, cv2, np):
     dist = cv2.distanceTransform(1 - b, cv2.DIST_L2, 3)
     add = ((b == 0) & (dist <= DEPTH_GROW) & (np.abs(depth - ref) < DEPTH_T_ADD) & (den > 0.02)).astype(np.uint8)
     rm = ((b > 0) & (depth < ref - DEPTH_T_RM)).astype(np.uint8)
+    # 足すのはキャラと同じ深度の物だけなので、キャラのすぐ前の花などが入っても、ピントとぼけはキャラと同じになるだけで害はない。
+    # 深度の違う物 (手前の浴槽の縁など) は足さない
     nb = b.copy()
     for m_, val, min_a in ((cv2.morphologyEx(add, cv2.MORPH_OPEN, ker), 1, DEPTH_MIN_ADD),
                            (cv2.morphologyEx(rm, cv2.MORPH_OPEN, ker), 0, DEPTH_MIN_RM)):
