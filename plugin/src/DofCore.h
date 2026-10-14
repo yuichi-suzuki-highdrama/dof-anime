@@ -65,14 +65,23 @@ enum {
 	OUTPUT_FOCUS_CHECK   /* ピントの合っている所を緑で示す */
 };
 
+/* ピント送りの 1 コマ分: Focus Point が動いている間は、動き始めの位置 A のピントから動き終わりの位置 B のピントへ、
+   点の進み具合 t (A→B の上での割合) に合わせて深度を移す (途中で通る背景にはピントを合わせない)。止まっていれば A = B */
+struct DfFocusSample {
+	float ax, ay, bx, by;
+	float t;                  /* A→B の進み具合 (0..1。キーフレームのイーズがそのまま効く) */
+	float w;                  /* 重み */
+};
+static constexpr int DF_PULL_MAX = 25;   /* ピント送りをならすときに見るコマの数の上限 (長い窓は間引く) */
+
 struct DofParams {
 	int   focusMode;
 	float focusX, focusY;     /* Focus Point (レイヤー座標、ダウンサンプル後) */
-	/* ピント送り: Focus Point が動いている間は、動き始めの位置 A のピントから動き終わりの位置 B のピントへ、
-	   点の進み具合 (A→B の上での割合) に合わせて深度を移す。途中で通る背景にはピントを合わせない */
-	bool  focusMoving;
-	float focusAX, focusAY, focusBX, focusBY;
-	float focusT;             /* A→B の進み具合 (0..1。キーフレームのイーズがそのまま効く) */
+	/* ピント送り (Focus Pull Time): 前後のコマのピントを、なめらかな重み (Hann) で平均する。
+	   映画のフォーカス送りのように、ゆっくり動き始めてゆっくり止まる (停止したキーフレームでも急に切り替わらない)。
+	   0 なら今のコマの Focus Point だけ */
+	int   pullCount;
+	DfFocusSample pull[DF_PULL_MAX];
 	float focusDepth;         /* Focus Mode = Depth のときの深度 (0..1、近い = 1) */
 	float focusRange;         /* ピントの合う幅 (深度の差がこれ以下ならぼかさない) */
 	int   subjectChannel;     /* Subject Layer の読み方 1: アルファ  2: 明るさ  3: Multi (RGB。赤・緑・青 = 1・2・3 人目のキャラ) */
@@ -109,6 +118,10 @@ static constexpr int   DF_TILE            = 16;      /* ぼけの最大値を求
 static constexpr float DF_MAX_COC_1080    = 160.f;   /* ぼけの半径の上限 (1080p でのピクセル数) */
 static constexpr float DF_DEPTH_REF       = 0.5f;    /* Blur Size が指す深度の差 */
 static constexpr float DF_FOCUS_SOFT      = 0.02f;   /* ピントの幅の外で、ぼけが立ち上がる幅 (深度) */
+static constexpr float DF_STEP_1080       = 8.f;     /* 深度の段差を締めるときに見るまわりの半径 (1080p でのピクセル数) */
+static constexpr float DF_STEP_LO         = 0.05f;   /* まわりの深度の幅がこれより小さければ段差ではない (なだらかな坂は締めない) */
+static constexpr float DF_STEP_HI         = 0.10f;   /* これより大きければ段差として締め切る */
+static constexpr float DF_STEP_MASK       = 0.05f;   /* キャラの縁とみなすマスクの値 (マスクは輪郭線の所で 0.1〜0.3 ほどなので、外側に取って輪郭線をキャラに含める) */
 static constexpr float DF_FOCUS_WINDOW    = 0.012f;  /* Focus Point のまわりで深度を調べる範囲 (画面の高さに対する半径) */
 static constexpr int   DF_STABILIZE_MAX   = 2;       /* 前後何フレームまで */
 static constexpr float DF_SNAP_SIGMA      = 0.08f;   /* 深度を線画に合わせるとき、色の近さの幅 */
@@ -255,6 +268,7 @@ struct DofContext {
 	float cocScale;           /* 深度の差 1 あたりのぼけの半径 (出力の画素) */
 	float maxCoc;             /* ぼけの半径の上限 (出力の画素) */
 	float expand;             /* 手前の輪郭を広げる幅 (出力の画素) */
+	float step;               /* 深度の段差を締めるときに見るまわりの半径 (出力の画素) */
 	int   maxSamples;
 	int   polySides;          /* 0 = 円 */
 	float polyRot;            /* ラジアン */
@@ -282,6 +296,7 @@ inline void dfSetupFrame(DofContext &c, float focusDepth)
 	c.cocScale   = dfMax(0.f, c.p.blurSize) * s / DF_DEPTH_REF;
 	c.maxCoc     = DF_MAX_COC_1080 * s;
 	c.expand     = dfMax(0.f, c.p.edgeExpand) * s;
+	c.step       = DF_STEP_1080 * s;
 	c.maxSamples = dfMaxSamples(c.p.quality);
 	c.polySides  = c.p.shape == SHAPE_HEXAGON ? 6 : (c.p.shape == SHAPE_OCTAGON ? 8 : 0);
 	c.polyRot    = c.p.shapeRotation * 3.14159265f / 180.f;
@@ -382,6 +397,56 @@ DF_HD DF_INL float dfExpand1D(const float *in, int W, int H, int rad, bool horiz
 		m = dfMax(m, in[(size_t)yy * W + xx]);
 	}
 	return m;
+}
+
+/*
+ * 深度の段差を締める。深度の地図は物の境目でなだらかにつながっているので、手前の物と奥の物の境目の途中の深度が
+ * ピントの深度を横切り、境目にピントの合った細い線が出る (ぼけた手前のキャラの縁がくっきり切れて見える)。
+ * ピントの合ったキャラの縁も、途中の深度だと半端にぼけて筋になる。
+ * そこで、まわりの深度の幅が大きい所 (段差) では、深度を近い側か遠い側のどちらか近い方に寄せる。
+ */
+/* キャラのマスクがあるときは、境目をマスクの縁で決める。深度の地図のキャラはマスクより少し太っているので、
+   深度だけで決めると、キャラのすぐ外の背景がキャラの深度に寄って、くっきりした背景の帯が残る。
+   そこで、近くにキャラがいてマスクの外の画素は、そのキャラの深度から遠い側に寄せる */
+/* まわりの最小と最大 (1 方向)。inMin, inMax: 前の段の最小と最大 (最初の段はどちらも深度)。
+   inW, inT (無ければ NULL): 前の段のマスクの最大と、その所のキャラの深度 → wm, ts */
+DF_HD DF_INL void dfMinMax1D(const float *inMin, const float *inMax, const float *inW, const float *inT, int W, int H, int rad, bool horizontal,
+                            int x, int y, float &mn, float &mx, float &wm, float &ts)
+{
+	const size_t n0 = (size_t)y * W + x;
+	mn = inMin[n0];
+	mx = inMax[n0];
+	wm = inW ? inW[n0] : 0.f;
+	ts = inT ? inT[n0] : -1.f;
+	for (int k = -rad; k <= rad; ++k) {
+		const int xx = horizontal ? dfClamp(x + k, 0, W - 1) : x;
+		const int yy = horizontal ? y : dfClamp(y + k, 0, H - 1);
+		const size_t n = (size_t)yy * W + xx;
+		mn = dfMin(mn, inMin[n]);
+		mx = dfMax(mx, inMax[n]);
+		if (inW && inW[n] > wm) { wm = inW[n]; ts = inT[n]; }
+	}
+}
+
+/* 深度 d を、まわりの最小 mn と最大 mx のどちらかへ寄せる (段差の大きさに合わせて)。
+   ふつうは近い方。w: この画素のマスク、wm, ts: まわりのマスクの最大とそのキャラの深度、focus: ピントの深度。
+   境目の 1〜2 画素はなめらかにつなぐ (ギザギザにしない)。ただし両側がピントの深度をはさむときは、
+   間の深度にするとピントの合った線が出るので、どちらかに決め切る */
+DF_HD DF_INL float dfStepDepth(float d, float mn, float mx, float w, float wm, float ts, float focus)
+{
+	const float range = mx - mn;
+	const float e = dfSmooth(DF_STEP_LO, DF_STEP_HI, range);
+	if (e <= 0.f) return d;
+	float a;   /* 0: 遠い側 mn、1: 近い側 mx */
+	if (wm >= 0.5f && ts >= 0.f && w < 0.95f) {
+		/* キャラの縁: マスクで決める。キャラの中はキャラの深度の側、外はその反対の側 */
+		const float k = dfSmooth(0.f, 2.f * DF_STEP_MASK, w);
+		a = (fabsf(mx - ts) < fabsf(mn - ts)) ? k : 1.f - k;
+	} else {
+		a = dfSmooth(0.35f, 0.65f, (d - mn) / range);
+	}
+	if ((mn - focus) * (mx - focus) < 0.f) a = a < 0.5f ? 0.f : 1.f;
+	return dfMix(d, dfMix(mn, mx, a), e);
 }
 
 /* キャラのマスク (Subject Layer) の 1 画素 (0..1)。深度と同じく、レイヤー全体を取り出して位置の割合で合わせる */
@@ -754,7 +819,17 @@ inline float dfResolveFocus(DofContext &c, const float *low, const float *mask, 
 		}
 		return dfFocusFromPoint(low, dw, dh, sx, sy, lx, ly);
 	};
-	if (c.p.focusMoving) return dfMix(at(c.p.focusAX, c.p.focusAY), at(c.p.focusBX, c.p.focusBY), dfSat(c.p.focusT));
+	if (c.p.pullCount > 0) {
+		float sum = 0.f, ws = 0.f;
+		for (int i = 0; i < c.p.pullCount && i < DF_PULL_MAX; ++i) {
+			const DfFocusSample &s = c.p.pull[i];
+			float f = at(s.ax, s.ay);
+			if (s.t > 0.f && (s.ax != s.bx || s.ay != s.by)) f = dfMix(f, at(s.bx, s.by), dfSat(s.t));
+			sum += f * s.w;
+			ws += s.w;
+		}
+		if (ws > 0.f) return sum / ws;
+	}
 	return at(c.p.focusX, c.p.focusY);
 }
 

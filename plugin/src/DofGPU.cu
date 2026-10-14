@@ -137,16 +137,42 @@ __global__ void kSubjectLow(DfAuxMap depthMap, DfAuxMap map, int channel, int dw
 	dfSubjectAtLow3(depthMap, map, channel, x, y, mask + ((size_t)y * dw + x) * 3);
 }
 
-/* ぼけの大きさ。マスクの中は深度を人物の代表の深度に寄せ (Subject Flatten)、Keep Subject Sharp の分だけぼけを減らす。
-   寄せた深度は depth に書き戻す (Output = Depth で見えるように) */
-__global__ void kCoc(DofContext c, float *depth, float *coc)
+/* マスクの中の深度を人物の代表の深度に寄せる (Subject Flatten)。寄せた深度は depth に書き戻す (Output = Depth で見えるように) */
+__global__ void kBlend(DofContext c, float *depth)
+{
+	DF_XY(c.outW, c.outH);
+	const size_t n = (size_t)y * c.outW + x;
+	depth[n] = dfSubjectBlendDepth(&c, depth[n], c.subject[n], c.subjectTgt[n]);
+}
+
+/* 深度の段差を締める: 横にまわりの最小と最大 (とマスクの最大) を取る。subject が NULL ならマスクは見ない */
+__global__ void kMinMaxH(const float *depth, const float *subject, const float *tgt, float *mn, float *mx, float *wm, float *ts, int W, int H, int rad)
+{
+	DF_XY(W, H);
+	const size_t n = (size_t)y * W + x;
+	float a, b, w, t;
+	dfMinMax1D(depth, depth, subject, tgt, W, H, rad, true, x, y, a, b, w, t);
+	mn[n] = a; mx[n] = b;
+	if (subject) { wm[n] = w; ts[n] = t; }
+}
+
+/* 縦にまわりの最小と最大を取り、深度を寄せる */
+__global__ void kStepV(const float *mnH, const float *mxH, const float *wmH, const float *tsH, const float *subject, float *depth, int W, int H, int rad, float focus)
+{
+	DF_XY(W, H);
+	float mn, mx, wm, ts;
+	dfMinMax1D(mnH, mxH, subject ? wmH : NULL, subject ? tsH : NULL, W, H, rad, false, x, y, mn, mx, wm, ts);
+	const size_t n = (size_t)y * W + x;
+	depth[n] = dfStepDepth(depth[n], mn, mx, subject ? subject[n] : 0.f, wm, ts, focus);
+}
+
+/* ぼけの大きさ。Keep Subject Sharp の分だけぼけを減らす */
+__global__ void kCoc(DofContext c, const float *depth, float *coc)
 {
 	DF_XY(c.outW, c.outH);
 	const size_t n = (size_t)y * c.outW + x;
 	const float s = c.subject ? c.subject[n] : 0.f;
-	const float d = c.subject ? dfSubjectBlendDepth(&c, depth[n], s, c.subjectTgt[n]) : depth[n];
-	depth[n] = d;
-	coc[n] = dfCoc(&c, d) * (1.f - dfSat(s * c.p.subjectAmount));
+	coc[n] = dfCoc(&c, depth[n]) * (1.f - dfSat(s * c.p.subjectAmount));
 }
 
 __global__ void kTileMax(DofContext c, float *tileMax)
@@ -235,7 +261,7 @@ int DofGPU_Render(DfGpuFrame &f, char *err, int errLen)
 	for (int k = 0; k < DF_LEVELS; ++k) count((size_t)c.lw[k] * c.lh[k] * 4);
 	if (hasDepth) {
 		count((size_t)dw * dh); count(NP); count(NP); count(NP);
-		if (hasSubject) { count(NP); count(NP); count((size_t)dw * dh * 3); }
+		if (hasSubject) { count(NP); count(NP); count(NP); count(NP); count((size_t)dw * dh * 3); }
 		count((size_t)c.tilesX * c.tilesY); count((size_t)c.tilesX * c.tilesY);
 	}
 	block = AcquireBlock(floats * sizeof(float));
@@ -296,6 +322,14 @@ int DofGPU_Render(DfGpuFrame &f, char *err, int errLen)
 			kSubject<<<Grid2(W, H), BLOCK2>>>(c, f.subjectMap, subject, tgt);
 			c.subject = subject;
 			c.subjectTgt = tgt;
+			kBlend<<<Grid2(W, H), BLOCK2>>>(c, depth);
+		}
+		const int step = dfRound(c.step);
+		if (step > 0) {
+			float *wm = NULL, *ts = NULL;
+			if (c.subject) { wm = cv.take(NP); ts = cv.take(NP); }
+			kMinMaxH<<<Grid2(W, H), BLOCK2>>>(depth, c.subject, c.subjectTgt, tmp, coc, wm, ts, W, H, step);   /* coc を作業に使う */
+			kStepV<<<Grid2(W, H), BLOCK2>>>(tmp, coc, wm, ts, c.subject, depth, W, H, step, c.focus);
 		}
 		kCoc<<<Grid2(W, H), BLOCK2>>>(c, depth, coc);
 		DF_CHECK("coc");

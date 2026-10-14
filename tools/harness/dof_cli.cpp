@@ -70,8 +70,8 @@ int main(int argc, char **argv)
 		else if (k == "pull") {
 			float v5[5] = {0, 0, 0, 0, 0};
 			if (std::sscanf(v.c_str(), "%f,%f,%f,%f,%f", &v5[0], &v5[1], &v5[2], &v5[3], &v5[4]) == 5) {
-				p.focusMoving = true;
-				p.focusAX = v5[0]; p.focusAY = v5[1]; p.focusBX = v5[2]; p.focusBY = v5[3]; p.focusT = v5[4];
+				p.pullCount = 1;
+				p.pull[0] = {v5[0], v5[1], v5[2], v5[3], v5[4], 1.f};
 			}
 		}
 		else if (k == "fx") p.focusX = f;

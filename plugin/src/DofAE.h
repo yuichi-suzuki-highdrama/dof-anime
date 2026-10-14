@@ -39,6 +39,7 @@ enum {
 	DOF_TOPIC_FOCUS,
 	DOF_FOCUS_MODE,           /* 1: Point  2: Depth */
 	DOF_FOCUS_POINT,
+	DOF_FOCUS_PULL,           /* ピント送りにかける時間 (秒)。前後のコマのピントをならす */
 	DOF_FOCUS_DEPTH,
 	DOF_FOCUS_RANGE,
 	DOF_SUBJECT_LAYER,        /* キャラのマスク (ロトブラシなど)。この中はくっきり残す */
@@ -107,6 +108,7 @@ enum {
 	ID_SUBJECT_TYPE,
 	ID_SUBJECT_GENERATE,
 	ID_SUBJECT_FLATTEN,
+	ID_FOCUS_PULL,
 
 	ID_TOPIC_BLUR = 50,
 	ID_BLUR_SIZE,

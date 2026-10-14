@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cstring>
 #include <vector>
+#include <map>
 #include <algorithm>
 #include <thread>
 #include <atomic>
@@ -42,6 +43,7 @@ static const float DEF_FOCUS_X         = 50.f;    /* レイヤーの幅に対す
 static const float DEF_FOCUS_Y         = 45.f;
 static const float DEF_FOCUS_DEPTH     = 0.7f;
 static const float DEF_FOCUS_RANGE     = 0.06f;
+static const float DEF_FOCUS_PULL      = 0.8f;    /* ピント送りにかける時間 (秒) */
 static const float DEF_BLUR_SIZE       = 30.f;
 static const float DEF_EDGE_EXPAND     = 2.f;
 static const float DEF_HIGHLIGHTS      = 1.f;
@@ -221,13 +223,41 @@ static float RenderFrameCPU(DofContext &c, const DfImage &src, const DfAuxMap &d
 			c.subject = subject.data();
 			c.subjectTgt = subjectTgt.data();
 		}
+		if (c.subject) {
+			parallelRows(H, [&](A_long y) {
+				for (int x = 0; x < W; ++x) {
+					const size_t n = (size_t)y * W + x;
+					depth[n] = dfSubjectBlendDepth(&c, depth[n], c.subject[n], c.subjectTgt[n]);
+				}
+			});
+		}
+		/* 深度の段差を締める (手前と奥の境目にピントの合った線が出ないように)。coc を作業に使う */
+		const int step = dfRound(c.step);
+		if (step > 0) {
+			std::vector<float> wm, ts;
+			if (c.subject) { wm.resize(NP); ts.resize(NP); }
+			parallelRows(H, [&](A_long y) {
+				for (int x = 0; x < W; ++x) {
+					const size_t n = (size_t)y * W + x;
+					float w, t;
+					dfMinMax1D(depth.data(), depth.data(), c.subject, c.subjectTgt, W, H, step, true, x, (int)y, tmp[n], coc[n], w, t);
+					if (c.subject) { wm[n] = w; ts[n] = t; }
+				}
+			});
+			parallelRows(H, [&](A_long y) {
+				for (int x = 0; x < W; ++x) {
+					float mn, mx, w, t;
+					dfMinMax1D(tmp.data(), coc.data(), c.subject ? wm.data() : NULL, c.subject ? ts.data() : NULL, W, H, step, false, x, (int)y, mn, mx, w, t);
+					const size_t n = (size_t)y * W + x;
+					depth[n] = dfStepDepth(depth[n], mn, mx, c.subject ? c.subject[n] : 0.f, w, t, c.focus);
+				}
+			});
+		}
 		parallelRows(H, [&](A_long y) {
 			for (int x = 0; x < W; ++x) {
 				const size_t n = (size_t)y * W + x;
 				const float s = c.subject ? c.subject[n] : 0.f;
-				const float d = c.subject ? dfSubjectBlendDepth(&c, depth[n], s, c.subjectTgt[n]) : depth[n];
-				depth[n] = d;
-				coc[n] = dfCoc(&c, d) * (1.f - dfSat(s * c.p.subjectAmount));
+				coc[n] = dfCoc(&c, depth[n]) * (1.f - dfSat(s * c.p.subjectAmount));
 			}
 		});
 		c.depth = depth.data();
@@ -360,6 +390,13 @@ static PF_Err ParamsSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef 
 
 	AEFX_CLR_STRUCT(def);
 	PF_ADD_POINT("Focus Point", (A_long)DEF_FOCUS_X, (A_long)DEF_FOCUS_Y, FALSE, ID_FOCUS_POINT);
+
+	/* ピント送りにかける時間 (秒)。Focus Point (または Focus Depth) のキーフレームでピントが移るとき、
+	   映画のフォーカス送りのように、この時間をかけてゆっくり動き始めてゆっくり止まる。
+	   停止したキーフレームでパッと切り替えても、ピントはこの時間で移る。0 でキーフレームのとおり */
+	AEFX_CLR_STRUCT(def);
+	PF_ADD_FLOAT_SLIDERX("Focus Pull Time", 0.f, 5.f, 0.f, 2.f, DEF_FOCUS_PULL,
+		PF_Precision_HUNDREDTHS, PF_ValueDisplayFlag_NONE, 0, ID_FOCUS_PULL);
 
 	AEFX_CLR_STRUCT(def);
 	PF_ADD_FLOAT_SLIDERX("Focus Depth", 0.f, 1.f, 0.f, 1.f, DEF_FOCUS_DEPTH,
@@ -587,52 +624,101 @@ struct ParamReader {
 	}
 };
 
-/* Focus Point が動いているか調べ、動いていれば動き始めの位置 A と動き終わりの位置 B、その間の進み具合を p に入れる。
-   前後のコマの値を 1 コマずつたどり、値が止まった所 (キーフレームの位置や停止の間) を A・B とする。最大 FOCUS_SEARCH コマまで */
+/*
+ * ピント送り。Focus Pull Time の長さの窓の中の前後のコマについて、そのコマのピントの決め方 (DfFocusSample) を p に入れる
+ * (重みは Hann の窓。ピントの深度はあとで深度の地図を見て dfResolveFocus が平均する)。
+ * 各コマでは、Focus Point が動いていれば、前後のコマの値を 1 コマずつたどって値が止まった所 (キーフレームの位置や
+ * 停止の間) を動き始め A・動き終わり B とする。最大 FOCUS_SEARCH コマまで。
+ * Focus Mode = Depth なら、Focus Depth の値を同じ重みで平均する。
+ */
 static const int FOCUS_SEARCH = 240;
 
-static void ReadFocusPull(PF_InData *in_data, DofParams &p)
+static void ReadFocusPull(PF_InData *in_data, DofParams &p, float pullSec)
 {
-	p.focusMoving = false;
-	if (p.focusMode != FOCUS_POINT || in_data->time_step <= 0) return;
-	auto pointAt = [&](A_long t, float *xy) -> bool {
-		PF_ParamDef def;
-		AEFX_CLR_STRUCT(def);
-		if (PF_CHECKOUT_PARAM(in_data, DOF_FOCUS_POINT, t, in_data->time_step, in_data->time_scale, &def) != PF_Err_NONE) return false;
-		xy[0] = (float)FIX_2_FLOAT(def.u.td.x_value);
-		xy[1] = (float)FIX_2_FLOAT(def.u.td.y_value);
-		PF_CHECKIN_PARAM(in_data, &def);
-		return true;
+	p.pullCount = 0;
+	if (in_data->time_step <= 0 || in_data->time_scale == 0) return;
+	const A_long t0 = in_data->current_time, dt = in_data->time_step;
+	/* 窓の半分の長さ (コマ)。長いときは間引いて DF_PULL_MAX 個までにする */
+	const double frames = (double)dfMax(0.f, pullSec) * (double)in_data->time_scale / (double)dt;
+	const int half = dfClamp((int)floor(frames * 0.5 + 0.5), 0, FOCUS_SEARCH);
+	const int maxHalf = (DF_PULL_MAX - 1) / 2;
+	const int stride = half > maxHalf ? (half + maxHalf - 1) / maxHalf : 1;
+	const int nh = half / stride;
+	auto weight = [&](int i) { return 0.5f + 0.5f * cosf(3.14159265f * (float)i / (float)(nh + 1)); };
+
+	if (p.focusMode != FOCUS_POINT) {
+		if (nh <= 0) return;
+		float sum = 0.f, ws = 0.f;
+		for (int i = -nh; i <= nh; ++i) {
+			PF_ParamDef def;
+			AEFX_CLR_STRUCT(def);
+			if (PF_CHECKOUT_PARAM(in_data, DOF_FOCUS_DEPTH, t0 + (A_long)(i * stride) * dt, dt, in_data->time_scale, &def) != PF_Err_NONE) continue;
+			const float w = weight(i);
+			sum += (float)FIX_2_FLOAT(def.u.fs_d.value) * w;
+			PF_CHECKIN_PARAM(in_data, &def);
+			ws += w;
+		}
+		if (ws > 0.f) p.focusDepth = dfSat(sum / ws);
+		return;
+	}
+
+	/* コマ k (今のコマからのずれ) の Focus Point。同じコマを何度も読まないよう覚えておく */
+	struct Pt { float x, y; bool ok; };
+	std::map<int, Pt> cache;
+	auto pointAt = [&](int k, float *xy) -> bool {
+		auto it = cache.find(k);
+		if (it == cache.end()) {
+			Pt v = {0.f, 0.f, false};
+			PF_ParamDef def;
+			AEFX_CLR_STRUCT(def);
+			if (PF_CHECKOUT_PARAM(in_data, DOF_FOCUS_POINT, t0 + (A_long)k * dt, dt, in_data->time_scale, &def) == PF_Err_NONE) {
+				v.x = (float)FIX_2_FLOAT(def.u.td.x_value);
+				v.y = (float)FIX_2_FLOAT(def.u.td.y_value);
+				v.ok = true;
+				PF_CHECKIN_PARAM(in_data, &def);
+			}
+			it = cache.emplace(k, v).first;
+		}
+		xy[0] = it->second.x; xy[1] = it->second.y;
+		return it->second.ok;
 	};
 	auto same = [](const float *a, const float *b) { return fabsf(a[0] - b[0]) < 0.01f && fabsf(a[1] - b[1]) < 0.01f; };
-	const A_long t0 = in_data->current_time, dt = in_data->time_step;
-	float p0[2] = {p.focusX, p.focusY}, prev[2], next[2];
-	if (!pointAt(t0 - dt, prev) || !pointAt(t0 + dt, next)) return;
-	if (same(prev, p0) && same(next, p0)) return;   /* 止まっている */
-	/* 後ろへたどって、止まった所 = A */
-	float a[2] = {p0[0], p0[1]}, cur[2] = {p0[0], p0[1]};
-	for (int k = 1; k <= FOCUS_SEARCH; ++k) {
-		float q[2];
-		if (!pointAt(t0 - k * dt, q)) break;
-		if (same(q, cur)) break;
-		cur[0] = q[0]; cur[1] = q[1];
-		a[0] = q[0]; a[1] = q[1];
+	/* コマ k のピントの決め方 */
+	auto sampleAt = [&](int k, DfFocusSample &s) -> bool {
+		float pk[2], prev[2], next[2];
+		if (!pointAt(k, pk)) return false;
+		s.ax = s.bx = pk[0]; s.ay = s.by = pk[1]; s.t = 0.f;
+		const bool hp = pointAt(k - 1, prev), hn = pointAt(k + 1, next);
+		if ((!hp || same(prev, pk)) && (!hn || same(next, pk))) return true;   /* 止まっている */
+		/* 後ろへたどって、止まった所 = A */
+		float a[2] = {pk[0], pk[1]}, b[2] = {pk[0], pk[1]}, cur[2] = {pk[0], pk[1]};
+		for (int j = 1; j <= FOCUS_SEARCH; ++j) {
+			float q[2];
+			if (!pointAt(k - j, q) || same(q, cur)) break;
+			cur[0] = a[0] = q[0]; cur[1] = a[1] = q[1];
+		}
+		/* 前へたどって、止まった所 = B */
+		cur[0] = pk[0]; cur[1] = pk[1];
+		for (int j = 1; j <= FOCUS_SEARCH; ++j) {
+			float q[2];
+			if (!pointAt(k + j, q) || same(q, cur)) break;
+			cur[0] = b[0] = q[0]; cur[1] = b[1] = q[1];
+		}
+		const float vx = b[0] - a[0], vy = b[1] - a[1], len2 = vx * vx + vy * vy;
+		if (len2 < 1.f) return true;
+		s.ax = a[0]; s.ay = a[1]; s.bx = b[0]; s.by = b[1];
+		s.t = dfSat(((pk[0] - a[0]) * vx + (pk[1] - a[1]) * vy) / len2);
+		return true;
+	};
+	bool varies = false;
+	for (int i = -nh; i <= nh; ++i) {
+		DfFocusSample s;
+		if (!sampleAt(i * stride, s)) continue;
+		s.w = weight(i);
+		if (s.ax != p.focusX || s.ay != p.focusY || s.bx != p.focusX || s.by != p.focusY) varies = true;
+		p.pull[p.pullCount++] = s;
 	}
-	/* 前へたどって、止まった所 = B */
-	float b[2] = {p0[0], p0[1]};
-	cur[0] = p0[0]; cur[1] = p0[1];
-	for (int k = 1; k <= FOCUS_SEARCH; ++k) {
-		float q[2];
-		if (!pointAt(t0 + k * dt, q)) break;
-		if (same(q, cur)) break;
-		cur[0] = q[0]; cur[1] = q[1];
-		b[0] = q[0]; b[1] = q[1];
-	}
-	const float vx = b[0] - a[0], vy = b[1] - a[1], len2 = vx * vx + vy * vy;
-	if (len2 < 1.f) return;
-	p.focusMoving = true;
-	p.focusAX = a[0]; p.focusAY = a[1]; p.focusBX = b[0]; p.focusBY = b[1];
-	p.focusT = dfSat(((p0[0] - a[0]) * vx + (p0[1] - a[1]) * vy) / len2);
+	if (!varies) p.pullCount = 0;   /* 窓の中でずっと止まっている */
 }
 
 static PF_Err ReadDofParams(PF_InData *in_data, DofParams &p)
@@ -642,8 +728,8 @@ static PF_Err ReadDofParams(PF_InData *in_data, DofParams &p)
 	float fp[2];
 	r.point2d(DOF_FOCUS_POINT, fp);
 	p.focusX = fp[0]; p.focusY = fp[1];
-	ReadFocusPull(in_data, p);
 	p.focusDepth  = dfSat(r.fs(DOF_FOCUS_DEPTH, DEF_FOCUS_DEPTH));
+	ReadFocusPull(in_data, p, r.fs(DOF_FOCUS_PULL, DEF_FOCUS_PULL));
 	p.focusRange  = dfMax(0.f, r.fs(DOF_FOCUS_RANGE, DEF_FOCUS_RANGE));
 	p.subjectChannel = (int)r.popup(DOF_SUBJECT_CHANNEL, 1);
 	p.subjectAmount  = dfSat(r.fs(DOF_SUBJECT_AMOUNT, 0.f) / 100.f);
