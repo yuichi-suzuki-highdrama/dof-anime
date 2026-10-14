@@ -70,7 +70,7 @@ struct DofParams {
 	float focusX, focusY;     /* Focus Point (レイヤー座標、ダウンサンプル後) */
 	float focusDepth;         /* Focus Mode = Depth のときの深度 (0..1、近い = 1) */
 	float focusRange;         /* ピントの合う幅 (深度の差がこれ以下ならぼかさない) */
-	int   subjectChannel;     /* Subject Layer の読み方 1: アルファ  2: 明るさ */
+	int   subjectChannel;     /* Subject Layer の読み方 1: アルファ  2: 明るさ  3: Multi (RGB。赤・緑・青 = 1・2・3 人目のキャラ) */
 	float subjectAmount;      /* Keep Subject Sharp: ピントに関係なく、マスクの中をどれだけくっきり残すか (0..1) */
 	float subjectFlatten;     /* Subject Flatten: マスクの中の深度を人物の代表の深度にどれだけ寄せるか (0..1)。
 	                             1 なら人物を 1 枚の板として扱い、人物の中のぼけのむらが無くなる */
@@ -98,6 +98,7 @@ struct DofParams {
 /* 定数                                                                 */
 /* ------------------------------------------------------------------ */
 
+static constexpr int   DF_MAX_SUBJECTS    = 3;       /* キャラを別々に扱う人数 (マスクの赤・緑・青) */
 static constexpr int   DF_LEVELS          = 4;       /* 色の縮小の段 (1, 1/2, 1/4, 1/8) */
 static constexpr int   DF_TILE            = 16;      /* ぼけの最大値を求める区画の一辺 (画素) */
 static constexpr float DF_MAX_COC_1080    = 160.f;   /* ぼけの半径の上限 (1080p でのピクセル数) */
@@ -257,8 +258,9 @@ struct DofContext {
 	const float *depth;       /* 深度 (近い = 1) */
 	const float *coc;         /* 符号付きのぼけの半径 (手前 = 負) */
 	const float *tileR;       /* 区画ごとの、届きうるぼけの最大の半径 */
-	const float *subject;     /* キャラのマスク (0..1、出力の大きさ。NULL なら無し) */
-	float subjectDepth;       /* 人物の代表の深度 (マスクの中の深度の中央値)。マスクが無ければ負 */
+	const float *subject;     /* キャラのマスク (全員を合わせたもの、0..1、出力の大きさ。NULL なら無し) */
+	const float *subjectTgt;  /* その画素のキャラの代表の深度 (Subject Flatten で寄せる先。キャラでなければ負) */
+	float subjectDepth[DF_MAX_SUBJECTS];   /* キャラごとの代表の深度 (マスクの中の深度の中央値)。いなければ負 */
 	/* リニアの色 (premultiplied、RGBA の順に 4 個ずつ)。lin[0] が出力の大きさ、lin[k] は 1/2^k */
 	const float *lin[DF_LEVELS];
 	int   lw[DF_LEVELS], lh[DF_LEVELS];
@@ -378,19 +380,32 @@ DF_HD DF_INL float dfExpand1D(const float *in, int W, int H, int rad, bool horiz
 }
 
 /* キャラのマスク (Subject Layer) の 1 画素 (0..1)。深度と同じく、レイヤー全体を取り出して位置の割合で合わせる */
-DF_HD DF_INL float dfSubjectAtF(const DfAuxMap &m, int channel, float fx, float fy)
+/* マスクの位置 (fx, fy、マスクのワールドの画素) で、キャラごとのマスクを o[0..2] に入れる。
+   Alpha / Luminance は 1 人分 (o[0] だけ)。Multi (RGB) は赤・緑・青を 1・2・3 人目とする */
+DF_HD DF_INL void dfSubjectAtF3(const DfAuxMap &m, int channel, float fx, float fy, float o[3])
 {
-	if (!m.img.data) return 0.f;
+	o[0] = o[1] = o[2] = 0.f;
+	if (!m.img.data) return;
 	fx = dfClamp(fx, 0.f, (float)(m.img.width - 1));
 	fy = dfClamp(fy, 0.f, (float)(m.img.height - 1));
 	const int x0 = (int)fx, y0 = (int)fy;
 	const float tx = fx - (float)x0, ty = fy - (float)y0;
-	float v[4];
 	for (int k = 0; k < 4; ++k) {
 		const DfRgba p = dfRead(m.img, x0 + (k & 1), y0 + (k >> 1));
-		v[k] = channel == 2 ? 0.2126f * p.r + 0.7152f * p.g + 0.0722f * p.b : p.a;   /* 明るさは premultiplied のまま (透明な所は 0) */
+		const float w = ((k & 1) ? tx : 1.f - tx) * ((k >> 1) ? ty : 1.f - ty);
+		if (channel == 3) { o[0] += p.r * w; o[1] += p.g * w; o[2] += p.b * w; }
+		else if (channel == 2) o[0] += (0.2126f * p.r + 0.7152f * p.g + 0.0722f * p.b) * w;   /* 明るさは premultiplied のまま (透明な所は 0) */
+		else o[0] += p.a * w;
 	}
-	return dfSat(dfMix(dfMix(v[0], v[1], tx), dfMix(v[2], v[3], tx), ty));
+	o[0] = dfSat(o[0]); o[1] = dfSat(o[1]); o[2] = dfSat(o[2]);
+}
+
+/* キャラ全員を合わせたマスク */
+DF_HD DF_INL float dfSubjectAtF(const DfAuxMap &m, int channel, float fx, float fy)
+{
+	float o[3];
+	dfSubjectAtF3(m, channel, fx, fy, o);
+	return dfSat(o[0] + o[1] + o[2]);
 }
 
 /* 出力の画素 (x, y) のマスク */
@@ -399,18 +414,31 @@ DF_HD DF_INL float dfSubjectAt(const DfAuxMap &m, int channel, int x, int y)
 	return dfSubjectAtF(m, channel, (float)x * m.sx + m.ox, (float)y * m.sy + m.oy);
 }
 
-/* 深度の点 (i, j) の位置のマスク。どちらもレイヤー全体を取り出しているので、レイヤーの中の位置の割合で合わせる */
-DF_HD DF_INL float dfSubjectAtLow(const DfAuxMap &depthMap, const DfAuxMap &m, int channel, int i, int j)
+/* 深度の点 (i, j) の位置の、キャラごとのマスク。どちらもレイヤー全体を取り出しているので、レイヤーの中の位置の割合で合わせる */
+DF_HD DF_INL void dfSubjectAtLow3(const DfAuxMap &depthMap, const DfAuxMap &m, int channel, int i, int j, float o[3])
 {
 	const float rx = m.sx / dfMax(depthMap.sx, 1e-6f), ry = m.sy / dfMax(depthMap.sy, 1e-6f);
-	return dfSubjectAtF(m, channel, ((float)i + 0.5f) * rx - 0.5f, ((float)j + 0.5f) * ry - 0.5f);
+	dfSubjectAtF3(m, channel, ((float)i + 0.5f) * rx - 0.5f, ((float)j + 0.5f) * ry - 0.5f, o);
 }
 
-/* マスクの中の深度を、人物の代表の深度へ寄せる (Subject Flatten)。s: その画素のマスク */
-DF_HD DF_INL float dfSubjectBlendDepth(const DofContext *c, float depth, float s)
+/* 出力の画素のキャラごとのマスク o → 全員を合わせたマスク w と、寄せる先の深度 tgt (キャラごとの代表の深度をマスクで重み付け。いなければ負) */
+DF_HD DF_INL void dfSubjectWeights(const DofContext *c, const float o[3], float &w, float &tgt)
 {
-	if (c->subjectDepth < 0.f || c->p.subjectFlatten <= 0.f) return depth;
-	return dfMix(depth, c->subjectDepth, dfSat(s * c->p.subjectFlatten));
+	float ws = 0.f, ts = 0.f;
+	for (int s = 0; s < DF_MAX_SUBJECTS; ++s) {
+		if (c->subjectDepth[s] < 0.f) continue;
+		ws += o[s];
+		ts += o[s] * c->subjectDepth[s];
+	}
+	w = dfSat(o[0] + o[1] + o[2]);
+	tgt = ws > 1e-4f ? ts / ws : -1.f;
+}
+
+/* マスクの中の深度を、そのキャラの代表の深度へ寄せる (Subject Flatten)。w: マスク、tgt: 寄せる先 */
+DF_HD DF_INL float dfSubjectBlendDepth(const DofContext *c, float depth, float w, float tgt)
+{
+	if (tgt < 0.f || c->p.subjectFlatten <= 0.f) return depth;
+	return dfMix(depth, tgt, dfSat(w * c->p.subjectFlatten));
 }
 
 /* ピントの深度からの差 → 符号付きのぼけの半径 (出力の画素。手前 = 負) */
@@ -671,14 +699,17 @@ DF_HD DF_INL DfRgba dfFinish(const DofContext *c, const float *lin, const DfRgba
 	return o;
 }
 
-/* 人物の代表の深度: マスクが半分以上の深度の点の、深度の中央値 (1024 段の度数で)。点が少なければ -1 */
-inline float dfSubjectMedian(const float *low, const float *mask, int dw, int dh)
+inline float dfFocusFromPoint(const float *low, int dw, int dh, float sx, float sy, float lx, float ly);
+
+/* キャラ s の代表の深度: そのキャラのマスクが半分以上の深度の点の、深度の中央値 (1024 段の度数で)。点が少なければ -1。
+   mask: 深度の点ごとに 3 個ずつ (キャラ 1・2・3) */
+inline float dfSubjectMedian(const float *low, const float *mask, int dw, int dh, int s)
 {
 	static const int BINS = 1024;
 	int hist[BINS] = {0};
 	int n = 0;
 	for (int k = 0; k < dw * dh; ++k) {
-		if (mask[k] < 0.5f) continue;
+		if (mask[(size_t)k * 3 + s] < 0.5f) continue;
 		hist[dfClamp((int)(dfSat(low[k]) * (BINS - 1) + 0.5f), 0, BINS - 1)]++;
 		++n;
 	}
@@ -691,12 +722,30 @@ inline float dfSubjectMedian(const float *low, const float *mask, int dw, int dh
 	return -1.f;
 }
 
-/* Focus Point (レイヤー座標) がマスクの中か (深度の点で見る) */
-inline bool dfPointInSubject(const float *mask, int dw, int dh, float sx, float sy, float lx, float ly)
+/* Focus Point (レイヤー座標) にいるキャラ (0..2)。いなければ -1 (深度の点で見る) */
+inline int dfPointSubject(const float *mask, int dw, int dh, float sx, float sy, float lx, float ly)
 {
 	const int i = dfClamp(dfRound((lx + 0.5f) * sx - 0.5f), 0, dw - 1);
 	const int j = dfClamp(dfRound((ly + 0.5f) * sy - 0.5f), 0, dh - 1);
-	return mask[(size_t)j * dw + i] >= 0.5f;
+	const float *m = mask + ((size_t)j * dw + i) * 3;
+	int best = -1;
+	float bv = 0.5f;
+	for (int s = 0; s < DF_MAX_SUBJECTS; ++s)
+		if (m[s] >= bv) { bv = m[s]; best = s; }
+	return best;
+}
+
+/* キャラごとの代表の深度を求め、Focus Point がキャラの上ならそのキャラの深度をピントにする (CPU と GPU で共通、ホストで)。
+   low: 深度の点、mask: キャラごとのマスク (3 個ずつ。NULL ならキャラなし)。戻り値: ピントの深度 */
+inline float dfResolveFocus(DofContext &c, const float *low, const float *mask, int dw, int dh, float sx, float sy)
+{
+	for (int s = 0; s < DF_MAX_SUBJECTS; ++s) c.subjectDepth[s] = mask ? dfSubjectMedian(low, mask, dw, dh, s) : -1.f;
+	if (c.p.focusMode != FOCUS_POINT) return c.p.focusDepth;
+	if (mask) {
+		const int s = dfPointSubject(mask, dw, dh, sx, sy, c.p.focusX, c.p.focusY);
+		if (s >= 0 && c.subjectDepth[s] >= 0.f) return c.subjectDepth[s];   /* キャラ全体にピントが合う */
+	}
+	return dfFocusFromPoint(low, dw, dh, sx, sy, c.p.focusX, c.p.focusY);
 }
 
 /* ピントの深度を求める: Focus Point のまわりの深度の中央値。

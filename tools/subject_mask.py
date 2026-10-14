@@ -6,10 +6,12 @@ subject_mask.py - ピントを合わせるキャラのマスクを、動画全�
   python subject_mask.py --video a.mp4 --out-dir cache/<shot>/subject_xxxx --point 450,190 [--frame 0] [--text "anime character"]
 
 手順:
-  1. --frame のコマで、--text の文字でキャラを検出する (SAM 3.1)。--point (Focus Point、素材の画素) を含むキャラを選ぶ。
-     含むものが無ければ、点にいちばん近いもの。文字で見つからなければ、点だけでマスクを作る
-  2. そのマスクから、動画の後ろへ追いかける (SAM 3.1 の動画の追跡)。--frame が 0 でなければ、前へも逆順に追いかける
-  3. 1 コマずつ subject.%05d.png (8bit の白黒、素材と同じ大きさ、白 = キャラ) に書く
+  1. --frame のコマで、--text の文字でキャラを全員検出する (SAM 3.1)。--point (Focus Point、素材の画素) を含むキャラを 1 人目にし、
+     残りは点に近い順に 3 人まで。文字で見つからなければ、点だけで 1 人分のマスクを作る
+  2. そのマスクから、キャラごとに別々に動画の後ろへ追いかける (SAM 3.1 の動画の追跡)。--frame が 0 でなければ、前へも逆順に追いかける
+  3. 1 コマずつ subject.%05d.png に書く。RGB の PNG で、赤 = 1 人目、緑 = 2 人目、青 = 3 人目のマスク (白 = キャラ)。
+     DoF Anime は Subject Channel = Multi (RGB) で読み、キャラごとに自分の代表の深度へ寄せる。
+  素材は動画でも静止画 (png / jpg / webp など) でもよい。
 
 SAM 3.1 は ComfyUI に入っている実装と重み (models/checkpoints/sam3.1_multiplex_fp16.safetensors) を、
 ComfyUI を立ち上げずに部品として使う。ComfyUI の Python (python_embeded) で動かすこと。
@@ -23,6 +25,10 @@ import os
 import sys
 import time
 from pathlib import Path
+
+
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
+MAX_SUBJECTS = 3   # RGB の 3 チャンネルに 1 人ずつ
 
 
 def write_json(path, obj, must=False):
@@ -76,18 +82,26 @@ def main():
 
     t0 = time.time()
     try:
-        # --- 動画を読む (素材の大きさのまま、0..1 の RGB) ---
-        cap = cv2.VideoCapture(a.video)
-        fps = cap.get(cv2.CAP_PROP_FPS) or 24.0
+        # --- 動画 (または静止画) を読む (素材の大きさのまま、0..1 の RGB) ---
+        fps = 24.0
         frames = []
-        while True:
-            ok, bgr = cap.read()
-            if not ok:
-                break
-            frames.append(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
-        cap.release()
+        if Path(a.video).suffix.lower() in IMAGE_EXTS:
+            # 静止画。Windows の日本語のパスでも読めるよう、バイト列から読む
+            buf = np.fromfile(a.video, dtype=np.uint8)
+            bgr = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+            if bgr is not None:
+                frames.append(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+        else:
+            cap = cv2.VideoCapture(a.video)
+            fps = cap.get(cv2.CAP_PROP_FPS) or 24.0
+            while True:
+                ok, bgr = cap.read()
+                if not ok:
+                    break
+                frames.append(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+            cap.release()
         if not frames:
-            raise RuntimeError("動画からコマを読めませんでした")
+            raise RuntimeError("素材からコマを読めませんでした")
         N = len(frames)
         H, W = frames[0].shape[:2]
         k = max(0, min(a.frame, N - 1))
@@ -106,52 +120,57 @@ def main():
         sam = model.model.diffusion_model
         write_json(status, {"state": "running", "pid": os.getpid(), "stage": "detect", "progress": 0.02})
 
-        # --- 1. 点のコマでキャラを検出し、点を含むものを選ぶ ---
+        # --- 1. 点のコマでキャラを全員検出する。点を含むキャラを 1 人目にし、残りは確からしい順に MAX_SUBJECTS 人まで ---
         frame = comfy.utils.common_upscale(images[k:k + 1].movedim(-1, 1), 1008, 1008, "bilinear", crop="disabled")
         frame = frame.to(device=device, dtype=dtype)
         cond = clip.encode_from_tokens_scheduled(clip.tokenize(a.text))
         emb = cond[0][0].to(device=device, dtype=dtype)
         tmask = cond[0][1].get("attention_mask")
         tmask = tmask.to(device) if tmask is not None else torch.ones(emb.shape[0], emb.shape[1], dtype=torch.int64, device=device)
-        init = None
-        how = ""
+        found = []   # (点を含むか, 確からしさ, 点までの距離, マスク)
         with torch.no_grad():
             r = sam(frame, text_embeddings=emb, text_mask=tmask, boxes=None, threshold=a.threshold, orig_size=(H, W))
             probs = r["scores"][0].sigmoid()
-            keep = (probs > a.threshold).nonzero().flatten().tolist()
-            best, best_d = None, None
-            for i in keep:
+            for i in (probs > a.threshold).nonzero().flatten().tolist():
                 m = F.interpolate(r["masks"][0][i][None, None].float(), size=(H, W), mode="bilinear")[0, 0] > 0
-                if bool(m[int(py), int(px)]):
-                    best, best_d = m, -float(probs[i])   # 点を含むもの (確からしい方)
-                    if best_d is not None and best_d < -1:
-                        break
-                    continue
                 ys, xs = m.nonzero(as_tuple=True)
-                if len(xs) == 0:
+                if len(xs) < 64:
                     continue
-                d = float(((xs.float() - px) ** 2 + (ys.float() - py) ** 2).min().sqrt())
-                if best is None or (best_d is not None and best_d >= 0 and d < best_d):
-                    best, best_d = m, d
-            if best is not None:
-                init = best
-                how = f"text '{a.text}' ({len(keep)} found, " + ("contains point" if best_d < 0 else f"nearest {best_d:.0f}px") + ")"
-            else:
-                # 文字で見つからなければ、点だけで
+                inside = bool(m[int(py), int(px)])
+                d = 0.0 if inside else float(((xs.float() - px) ** 2 + (ys.float() - py) ** 2).min().sqrt())
+                found.append((inside, float(probs[i]), d, m))
+            # 同じキャラを 2 回拾ったもの (大きく重なる) は、確からしい方だけ残す
+            found.sort(key=lambda f: -f[1])
+            uniq = []
+            for f in found:
+                if all(float((f[3] & g[3]).sum()) / float(min(f[3].sum(), g[3].sum())) < 0.6 for g in uniq):
+                    uniq.append(f)
+            # 点を含むもの → 点に近いもの の順。1 人目が「ピントを合わせたキャラ」
+            uniq.sort(key=lambda f: (not f[0], f[2], -f[1]))
+            masks = [f[3] for f in uniq[:MAX_SUBJECTS]]
+            how = f"text '{a.text}' ({len(found)} found, {len(masks)} used" + (", first contains point" if uniq and uniq[0][0] else "") + ")"
+            if not masks:
+                # 文字で見つからなければ、点だけで 1 人
                 pts = {"point_coords": torch.tensor([[[px / W * 1008, py / H * 1008]]], dtype=dtype, device=device),
                        "point_labels": torch.tensor([[1]], dtype=torch.int32, device=device)}
                 ml = sam.forward_segment(frame, point_inputs=pts)
                 for _ in range(2):
                     ml = sam.forward_segment(frame, mask_inputs=ml)
-                init = F.interpolate(ml.float(), size=(H, W), mode="bilinear")[0, 0] > 0
+                masks = [F.interpolate(ml.float(), size=(H, W), mode="bilinear")[0, 0] > 0]
                 how = "point only"
-        print(f"start mask: frame {k}, {how}, area {float(init.float().mean()):.3f}", flush=True)
+        S = len(masks)
+        init = torch.stack(masks).float()[:, None]   # [S, 1, H, W]
+        print(f"start masks: frame {k}, {how}, areas " + ", ".join(f"{float(m.float().mean()):.3f}" for m in masks), flush=True)
 
-        # --- 2. 追いかける (後ろへ、必要なら前へも) ---
-        result = np.zeros((N, H, W), np.uint8)
+        # --- 2. 追いかける (後ろへ、必要なら前へも)。キャラごとに別々のマスク ---
+        result = np.zeros((N, H, W, 3), np.uint8)   # R, G, B = 1 人目, 2 人目, 3 人目
+        for s in range(S):
+            result[k, :, :, s] = (masks[s].float() * 255 + 0.5).byte().cpu().numpy()
         done = [0]
 
         def track(order):
+            if len(order) < 2:
+                return
             imgs = images[order].movedim(-1, 1)   # [n, 3, H, W]
             n = len(order)
 
@@ -164,31 +183,33 @@ def main():
                 def update_absolute(self, v, total=None, preview=None):
                     pass
             with torch.no_grad():
-                res = sam.forward_video(images=imgs, initial_masks=init[None, None].to(device=device, dtype=dtype),
-                                        pbar=Bar(), text_prompts=None, new_det_thresh=0.5, max_objects=1,
+                res = sam.forward_video(images=imgs, initial_masks=init.to(device=device, dtype=dtype),
+                                        pbar=Bar(), text_prompts=None, new_det_thresh=0.5, max_objects=S,
                                         detect_interval=1, target_device=device, target_dtype=dtype)
             packed = res["packed_masks"]
             if packed is None:
                 return
             for j in range(n):
-                m = unpack_masks(packed[j, 0]).float()[None, None]
-                m = F.interpolate(m, size=(H, W), mode="bilinear", align_corners=False)[0, 0]
-                result[order[j]] = (m.clamp(0, 1) * 255 + 0.5).byte().cpu().numpy()
+                for s in range(min(S, packed.shape[1])):
+                    m = unpack_masks(packed[j, s]).float()[None, None]
+                    m = F.interpolate(m, size=(H, W), mode="bilinear", align_corners=False)[0, 0]
+                    result[order[j], :, :, s] = (m.clamp(0, 1) * 255 + 0.5).byte().cpu().numpy()
 
         track(list(range(k, N)))
         if k > 0:
             track(list(range(k, -1, -1)))
 
-        # --- 3. 書き出す ---
+        # --- 3. 書き出す (RGB の PNG。OpenCV は BGR の順で書くので並べ替える) ---
         write_json(status, {"state": "running", "pid": os.getpid(), "stage": "write", "progress": 0.97})
         for i in range(N):
-            cv2.imwrite(str(out / f"subject.{i + 1:05d}.png"), result[i])
+            cv2.imwrite(str(out / f"subject.{i + 1:05d}.png"), result[i][:, :, ::-1])
         write_json(out / "manifest.json", {
             "generator": "subject_mask.py", "model": "sam3.1_multiplex", "text": a.text,
-            "point": [px, py], "frame": k, "start": how, "frames": N, "size": [W, H], "fps": fps,
+            "point": [px, py], "frame": k, "start": how, "subjects": S, "channels": "R,G,B = subject 1,2,3",
+            "frames": N, "size": [W, H], "fps": fps,
             "file": "subject.%05d.png", "seconds": round(time.time() - t0, 1)}, must=True)
         write_json(status, {"state": "done", "pid": os.getpid(), "progress": 1.0}, must=True)
-        print(f"done: {N} frames in {time.time() - t0:.1f}s", flush=True)
+        print(f"done: {N} frames, {S} subjects in {time.time() - t0:.1f}s", flush=True)
         return 0
     except Exception as e:  # noqa: BLE001
         write_json(status, {"state": "failed", "pid": os.getpid(), "message": f"{type(e).__name__}: {e}"})

@@ -120,16 +120,21 @@ __global__ void kExpand(const float *in, float *out, int W, int H, int rad, bool
 	out[(size_t)y * W + x] = dfExpand1D(in, W, H, rad, horizontal, x, y);
 }
 
-__global__ void kSubject(DofContext c, DfAuxMap map, float *subject)
+__global__ void kSubject(DofContext c, DfAuxMap map, float *subject, float *tgtOut)
 {
 	DF_XY(c.outW, c.outH);
-	subject[(size_t)y * c.outW + x] = dfSubjectAt(map, c.p.subjectChannel, x, y);
+	float o[3], w, tgt;
+	dfSubjectAtF3(map, c.p.subjectChannel, (float)x * map.sx + map.ox, (float)y * map.sy + map.oy, o);
+	dfSubjectWeights(&c, o, w, tgt);
+	const size_t n = (size_t)y * c.outW + x;
+	subject[n] = w;
+	tgtOut[n] = tgt;
 }
 
 __global__ void kSubjectLow(DfAuxMap depthMap, DfAuxMap map, int channel, int dw, int dh, float *mask)
 {
 	DF_XY(dw, dh);
-	mask[(size_t)y * dw + x] = dfSubjectAtLow(depthMap, map, channel, x, y);
+	dfSubjectAtLow3(depthMap, map, channel, x, y, mask + ((size_t)y * dw + x) * 3);
 }
 
 /* ぼけの大きさ。マスクの中は深度を人物の代表の深度に寄せ (Subject Flatten)、Keep Subject Sharp の分だけぼけを減らす。
@@ -139,7 +144,7 @@ __global__ void kCoc(DofContext c, float *depth, float *coc)
 	DF_XY(c.outW, c.outH);
 	const size_t n = (size_t)y * c.outW + x;
 	const float s = c.subject ? c.subject[n] : 0.f;
-	const float d = dfSubjectBlendDepth(&c, depth[n], s);
+	const float d = c.subject ? dfSubjectBlendDepth(&c, depth[n], s, c.subjectTgt[n]) : depth[n];
 	depth[n] = d;
 	coc[n] = dfCoc(&c, d) * (1.f - dfSat(s * c.p.subjectAmount));
 }
@@ -216,10 +221,10 @@ int DofGPU_Render(DfGpuFrame &f, char *err, int errLen)
 	c.lutDec = DeviceLut();
 	if (!c.lutDec) { if (err) snprintf(err, errLen, "LUT alloc failed"); return -1; }
 	c.lutEnc = c.lutDec + DF_LUT_SIZE;
-	c.depth = c.coc = c.tileR = c.subject = NULL;
+	c.depth = c.coc = c.tileR = c.subject = c.subjectTgt = NULL;
 	dfSetupFrame(c, c.p.focusDepth);
 	const bool hasSubject = f.subjectMap.img.data != NULL && (c.p.subjectAmount > 0.f || c.p.subjectFlatten > 0.f);
-	c.subjectDepth = -1.f;
+	for (int s = 0; s < DF_MAX_SUBJECTS; ++s) c.subjectDepth[s] = -1.f;
 
 	const bool hasDepth = f.depthMap.img.data != NULL;
 	const int dw = f.depthMap.img.width, dh = f.depthMap.img.height;
@@ -230,7 +235,7 @@ int DofGPU_Render(DfGpuFrame &f, char *err, int errLen)
 	for (int k = 0; k < DF_LEVELS; ++k) count((size_t)c.lw[k] * c.lh[k] * 4);
 	if (hasDepth) {
 		count((size_t)dw * dh); count(NP); count(NP); count(NP);
-		if (hasSubject) { count(NP); count((size_t)dw * dh); }
+		if (hasSubject) { count(NP); count(NP); count((size_t)dw * dh * 3); }
 		count((size_t)c.tilesX * c.tilesY); count((size_t)c.tilesX * c.tilesY);
 	}
 	block = AcquireBlock(floats * sizeof(float));
@@ -262,25 +267,19 @@ int DofGPU_Render(DfGpuFrame &f, char *err, int errLen)
 			cudaMemcpy(host.data(), low, sizeof(float) * host.size(), cudaMemcpyDeviceToHost);
 			std::vector<float> hmask;
 			if (hasSubject) {
-				float *lowMask = cv.take((size_t)dw * dh);
+				float *lowMask = cv.take((size_t)dw * dh * 3);
 				kSubjectLow<<<Grid2(dw, dh), BLOCK2>>>(f.depthMap, f.subjectMap, c.p.subjectChannel, dw, dh, lowMask);
 				DF_CHECK("subject low");
-				hmask.resize((size_t)dw * dh);
+				hmask.resize((size_t)dw * dh * 3);
 				cudaMemcpy(hmask.data(), lowMask, sizeof(float) * hmask.size(), cudaMemcpyDeviceToHost);
-				c.subjectDepth = dfSubjectMedian(host.data(), hmask.data(), dw, dh);
 			}
-			if (c.p.focusMode == FOCUS_POINT) {
-				/* Focus Point が人物の上なら、人物の代表の深度に合わせる (人物全体にピントが合う) */
-				if (c.subjectDepth >= 0.f && dfPointInSubject(hmask.data(), dw, dh, f.depthMap.sx, f.depthMap.sy, c.p.focusX, c.p.focusY))
-					focus = c.subjectDepth;
-				else
-					focus = dfFocusFromPoint(host.data(), dw, dh, f.depthMap.sx, f.depthMap.sy, c.p.focusX, c.p.focusY);
-			}
+			focus = dfResolveFocus(c, host.data(), hasSubject ? hmask.data() : NULL, dw, dh, f.depthMap.sx, f.depthMap.sy);
 		}
 		{
-			const float sd = c.subjectDepth;
+			float sd[DF_MAX_SUBJECTS];
+			for (int s = 0; s < DF_MAX_SUBJECTS; ++s) sd[s] = c.subjectDepth[s];
 			dfSetupFrame(c, focus);
-			c.subjectDepth = sd;
+			for (int s = 0; s < DF_MAX_SUBJECTS; ++s) c.subjectDepth[s] = sd[s];
 		}
 		f.focusUsed = focus;
 
@@ -293,9 +292,10 @@ int DofGPU_Render(DfGpuFrame &f, char *err, int errLen)
 			cudaMemcpy(depth, coc, sizeof(float) * NP, cudaMemcpyDeviceToDevice);
 		}
 		if (hasSubject) {
-			float *subject = cv.take(NP);
-			kSubject<<<Grid2(W, H), BLOCK2>>>(c, f.subjectMap, subject);
+			float *subject = cv.take(NP), *tgt = cv.take(NP);
+			kSubject<<<Grid2(W, H), BLOCK2>>>(c, f.subjectMap, subject, tgt);
 			c.subject = subject;
+			c.subjectTgt = tgt;
 		}
 		kCoc<<<Grid2(W, H), BLOCK2>>>(c, depth, coc);
 		DF_CHECK("coc");

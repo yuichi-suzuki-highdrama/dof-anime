@@ -152,9 +152,9 @@ static float RenderFrameCPU(DofContext &c, const DfImage &src, const DfAuxMap &d
 	const size_t NP = (size_t)W * H;
 	c.lutDec = HostLut();
 	c.lutEnc = c.lutDec + DF_LUT_SIZE;
-	c.depth = c.coc = c.tileR = c.subject = NULL;
+	c.depth = c.coc = c.tileR = c.subject = c.subjectTgt = NULL;
 	dfSetupFrame(c, c.p.focusDepth);
-	c.subjectDepth = -1.f;
+	for (int s = 0; s < DF_MAX_SUBJECTS; ++s) c.subjectDepth[s] = -1.f;
 
 	/* 1. リニアの色と縮小 */
 	std::vector<float> lin[DF_LEVELS];
@@ -169,7 +169,7 @@ static float RenderFrameCPU(DofContext &c, const DfImage &src, const DfAuxMap &d
 	for (int k = 0; k < DF_LEVELS; ++k) c.lin[k] = lin[k].data();
 
 	/* 2. 深度 → ピント → ぼけの大きさ */
-	std::vector<float> low, depth, tmp, coc, tileMax, tileR, subject;
+	std::vector<float> low, depth, tmp, coc, tileMax, tileR, subject, subjectTgt;
 	float focus = c.p.focusDepth;
 	if (depthMap.img.data) {
 		const int dw = depthMap.img.width, dh = depthMap.img.height;
@@ -185,21 +185,16 @@ static float RenderFrameCPU(DofContext &c, const DfImage &src, const DfAuxMap &d
 		const bool hasSubject = subjectMap.img.data && (c.p.subjectAmount > 0.f || c.p.subjectFlatten > 0.f);
 		std::vector<float> lowMask;
 		if (hasSubject) {
-			lowMask.resize((size_t)dw * dh);
-			parallelRows(dh, [&](A_long j) { for (int i = 0; i < dw; ++i) lowMask[(size_t)j * dw + i] = dfSubjectAtLow(depthMap, subjectMap, c.p.subjectChannel, i, (int)j); });
-			c.subjectDepth = dfSubjectMedian(low.data(), lowMask.data(), dw, dh);
+			lowMask.resize((size_t)dw * dh * 3);
+			parallelRows(dh, [&](A_long j) { for (int i = 0; i < dw; ++i) dfSubjectAtLow3(depthMap, subjectMap, c.p.subjectChannel, i, (int)j, &lowMask[((size_t)j * dw + i) * 3]); });
 		}
-		if (c.p.focusMode == FOCUS_POINT) {
-			/* Focus Point が人物の上なら、人物の代表の深度に合わせる (人物全体にピントが合う) */
-			if (c.subjectDepth >= 0.f && dfPointInSubject(lowMask.data(), dw, dh, depthMap.sx, depthMap.sy, c.p.focusX, c.p.focusY))
-				focus = c.subjectDepth;
-			else
-				focus = dfFocusFromPoint(low.data(), dw, dh, depthMap.sx, depthMap.sy, c.p.focusX, c.p.focusY);
-		}
+		/* キャラごとの代表の深度。Focus Point がキャラの上なら、そのキャラの深度にピントを合わせる (キャラ全体にピントが合う) */
+		focus = dfResolveFocus(c, low.data(), hasSubject ? lowMask.data() : NULL, dw, dh, depthMap.sx, depthMap.sy);
 		{
-			const float sd = c.subjectDepth;
+			float sd[DF_MAX_SUBJECTS];
+			for (int s = 0; s < DF_MAX_SUBJECTS; ++s) sd[s] = c.subjectDepth[s];
 			dfSetupFrame(c, focus);
-			c.subjectDepth = sd;
+			for (int s = 0; s < DF_MAX_SUBJECTS; ++s) c.subjectDepth[s] = sd[s];
 		}
 
 		depth.resize(NP); tmp.resize(NP); coc.resize(NP);
@@ -214,14 +209,23 @@ static float RenderFrameCPU(DofContext &c, const DfImage &src, const DfAuxMap &d
 		/* キャラのマスク。中の深度を人物の代表の深度に寄せ (Subject Flatten)、Keep Subject Sharp の分だけぼけを減らす */
 		if (hasSubject) {
 			subject.resize(NP);
-			parallelRows(H, [&](A_long y) { for (int x = 0; x < W; ++x) subject[(size_t)y * W + x] = dfSubjectAt(subjectMap, c.p.subjectChannel, x, (int)y); });
+			subjectTgt.resize(NP);
+			parallelRows(H, [&](A_long y) {
+				for (int x = 0; x < W; ++x) {
+					float o[3];
+					dfSubjectAtF3(subjectMap, c.p.subjectChannel, (float)x * subjectMap.sx + subjectMap.ox, (float)y * subjectMap.sy + subjectMap.oy, o);
+					const size_t n = (size_t)y * W + x;
+					dfSubjectWeights(&c, o, subject[n], subjectTgt[n]);
+				}
+			});
 			c.subject = subject.data();
+			c.subjectTgt = subjectTgt.data();
 		}
 		parallelRows(H, [&](A_long y) {
 			for (int x = 0; x < W; ++x) {
 				const size_t n = (size_t)y * W + x;
 				const float s = c.subject ? c.subject[n] : 0.f;
-				const float d = dfSubjectBlendDepth(&c, depth[n], s);
+				const float d = c.subject ? dfSubjectBlendDepth(&c, depth[n], s, c.subjectTgt[n]) : depth[n];
 				depth[n] = d;
 				coc[n] = dfCoc(&c, d) * (1.f - dfSat(s * c.p.subjectAmount));
 			}
@@ -372,7 +376,8 @@ static PF_Err ParamsSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef 
 	PF_ADD_LAYER("Subject Layer", PF_LayerDefault_NONE, ID_SUBJECT_LAYER);
 
 	AEFX_CLR_STRUCT(def);
-	PF_ADD_POPUP("Subject Channel", 2, 1, "Alpha|Luminance", ID_SUBJECT_CHANNEL);
+	/* Multi (RGB): 赤・緑・青をキャラ 1・2・3 人目として、キャラごとに自分の深度へ寄せる (自動のマスクはこれ) */
+	PF_ADD_POPUP("Subject Channel", 3, 1, "Alpha|Luminance|Multi (RGB)", ID_SUBJECT_CHANNEL);
 
 	/* マスクの中の深度を、人物の代表の深度 (マスクの中の深度の中央値) に寄せる。100% で人物を 1 枚の板として扱う。
 	   Focus Point が人物の上なら人物全体にピントが合い、背景へ動かせば人物は全体が均一にぼける (ピント送りができる) */

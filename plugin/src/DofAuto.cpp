@@ -988,7 +988,7 @@ static bool ImportSubject(AEGP_SuiteHandler &suites, AutoJob &job, std::wstring 
 		suites.LayerSuite9()->AEGP_GetLayerID(subjL, &subjId);
 		for (AEGP_EffectRefH eH : effects) {
 			SetStreamLayerId(suites, eH, L"Subject Layer", subjId);
-			SetStreamOneD(suites, eH, L"Subject Channel", 2.0);   /* 白黒の PNG なので明るさで読む */
+			SetStreamOneD(suites, eH, L"Subject Channel", 3.0);   /* 赤・緑・青 = キャラ 1・2・3 人目 */
 		}
 		for (AEGP_LayerIDVal id : oldIds) {
 			if (id == subjId) continue;
@@ -1044,7 +1044,7 @@ static void ProcessSubjectJob(AEGP_SuiteHandler &suites, AutoJob &job, std::vect
 		job.cacheDir = g_cfg.cache + L"\\" + job.shotKey;
 		/* 同じ点・コマ・種類なら同じマスク (キャッシュを使う) */
 		wchar_t tag[96];
-		swprintf(tag, 96, L"subject_%d_%d_f%ld_t%d", (int)std::lround(job.pointX), (int)std::lround(job.pointY),
+		swprintf(tag, 96, L"subjects_%d_%d_f%ld_t%d",   /* 全員を別々に (RGB) にしてから名前を変えた (以前の白黒 1 人分は使わない) */ (int)std::lround(job.pointX), (int)std::lround(job.pointY),
 		         (long)job.promptFrame, job.subjectType);
 		job.subjectDir = job.cacheDir + L"\\" + tag;
 		AutoLog(L"subject: " + job.subjectDir);

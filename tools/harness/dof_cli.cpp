@@ -50,7 +50,7 @@ int main(int argc, char **argv)
 	p.inputLinear = false; p.outputMode = OUTPUT_FINAL; p.mix = 1.f;
 	p.subjectChannel = 1; p.subjectAmount = 0.f; p.subjectFlatten = 1.f;
 	std::vector<std::string> nbFiles;
-	std::string subjectFile;
+	std::string subjectFile, subjectRgbFile;
 	for (int i = 6; i < argc; ++i) {
 		std::string a = argv[i];
 		size_t eq = a.find('=');
@@ -63,6 +63,7 @@ int main(int argc, char **argv)
 		else if (k == "repeat") repeat = std::max(1, std::atoi(v.c_str()));
 		else if (k == "nb") nbFiles.push_back(v);
 		else if (k == "subject") subjectFile = v;
+		else if (k == "subjectrgb") { subjectRgbFile = v; p.subjectChannel = 3; }   /* キャラごとの RGB のマスク (W x H x 3) */
 		else if (k == "keep") p.subjectAmount = f;
 		else if (k == "flatten") p.subjectFlatten = f;
 		else if (k == "fx") p.focusX = f;
@@ -89,8 +90,17 @@ int main(int argc, char **argv)
 	const bool hasDepth = std::string(argv[2]) != "-";
 	if (hasDepth && !readFile(argv[2], depth, (size_t)dw * dh)) { std::fprintf(stderr, "depth read failed\n"); return 1; }
 	/* キャラのマスクは 1 チャンネル → アルファに入れる (Subject Channel = Alpha と同じ) */
-	std::vector<float> subjectGray, subjectArgb;
-	if (!subjectFile.empty()) {
+	std::vector<float> subjectGray, subjectArgb, subjectBgra;
+	if (!subjectRgbFile.empty()) {
+		std::vector<float> rgb;
+		if (!readFile(subjectRgbFile.c_str(), rgb, (size_t)W * H * 3)) { std::fprintf(stderr, "subject rgb read failed\n"); return 1; }
+		subjectArgb.resize((size_t)W * H * 4);
+		subjectBgra.resize((size_t)W * H * 4);
+		for (size_t n = 0; n < (size_t)W * H; ++n) {
+			subjectArgb[n * 4 + 0] = 1.f; subjectArgb[n * 4 + 1] = rgb[n * 3]; subjectArgb[n * 4 + 2] = rgb[n * 3 + 1]; subjectArgb[n * 4 + 3] = rgb[n * 3 + 2];
+			subjectBgra[n * 4 + 0] = rgb[n * 3 + 2]; subjectBgra[n * 4 + 1] = rgb[n * 3 + 1]; subjectBgra[n * 4 + 2] = rgb[n * 3]; subjectBgra[n * 4 + 3] = 1.f;
+		}
+	} else if (!subjectFile.empty()) {
 		if (!readFile(subjectFile.c_str(), subjectGray, (size_t)W * H)) { std::fprintf(stderr, "subject read failed\n"); return 1; }
 		subjectArgb.resize((size_t)W * H * 4);
 		for (size_t n = 0; n < (size_t)W * H; ++n) {
@@ -150,8 +160,9 @@ int main(int argc, char **argv)
 		float *dSrc = NULL, *dDst = NULL, *dDepth = NULL, *dSubj = NULL;
 		if (!subjectArgb.empty()) {
 			/* ARGB → BGRA (どれも同じ値なので並びはそのまま) */
-			cudaMalloc(&dSubj, subjectArgb.size() * 4);
-			cudaMemcpy(dSubj, subjectArgb.data(), subjectArgb.size() * 4, cudaMemcpyHostToDevice);
+			const std::vector<float> &sb = subjectBgra.empty() ? subjectArgb : subjectBgra;
+			cudaMalloc(&dSubj, sb.size() * 4);
+			cudaMemcpy(dSubj, sb.data(), sb.size() * 4, cudaMemcpyHostToDevice);
 		}
 		std::vector<float *> dNb;
 		cudaMalloc(&dSrc, bgra.size() * 4);
