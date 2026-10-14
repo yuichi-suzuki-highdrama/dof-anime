@@ -66,6 +66,14 @@ int main(int argc, char **argv)
 		else if (k == "subjectrgb") { subjectRgbFile = v; p.subjectChannel = 3; }   /* キャラごとの RGB のマスク (W x H x 3) */
 		else if (k == "keep") p.subjectAmount = f;
 		else if (k == "flatten") p.subjectFlatten = f;
+		/* ピント送りの途中: pull=ax,ay,bx,by,t (A→B を t の割合だけ進んだところ) */
+		else if (k == "pull") {
+			float v5[5] = {0, 0, 0, 0, 0};
+			if (std::sscanf(v.c_str(), "%f,%f,%f,%f,%f", &v5[0], &v5[1], &v5[2], &v5[3], &v5[4]) == 5) {
+				p.focusMoving = true;
+				p.focusAX = v5[0]; p.focusAY = v5[1]; p.focusBX = v5[2]; p.focusBY = v5[3]; p.focusT = v5[4];
+			}
+		}
 		else if (k == "fx") p.focusX = f;
 		else if (k == "fy") p.focusY = f;
 		else if (k == "fmode") p.focusMode = (int)f;

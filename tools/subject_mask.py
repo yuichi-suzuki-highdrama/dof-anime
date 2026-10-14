@@ -12,6 +12,8 @@ subject_mask.py - ピントを合わせるキャラのマスクを、動画全�
   3. 1 コマずつ subject.%05d.png に書く。RGB の PNG で、赤 = 1 人目、緑 = 2 人目、青 = 3 人目のマスク (白 = キャラ)。
      DoF Anime は Subject Channel = Multi (RGB) で読み、キャラごとに自分の代表の深度へ寄せる。
   素材は動画でも静止画 (png / jpg / webp など) でもよい。
+  マスクは仕上げに、(a) 検出したマスクを SAM の細かい段 (1008 画素、キャラの周りを切り出して) で詰め直し、
+  (b) キャラの内側の小さな穴を埋めて小さな切れ端を消し、(c) 元の絵をガイドにしたガイデッドフィルタで縁を線画に寄せる。
 
 SAM 3.1 は ComfyUI に入っている実装と重み (models/checkpoints/sam3.1_multiplex_fp16.safetensors) を、
 ComfyUI を立ち上げずに部品として使う。ComfyUI の Python (python_embeded) で動かすこと。
@@ -29,6 +31,61 @@ from pathlib import Path
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 MAX_SUBJECTS = 3   # RGB の 3 チャンネルに 1 人ずつ
+REFINE_ITERS = 2   # 検出したマスクを SAM の細かい段で詰め直す回数
+
+
+def refine_mask(sam, image_hwc, coarse_logits, box, H, W, device, dtype, F, comfy_utils):
+    """検出の粗いマスク (logits) を、キャラの周りを 1008 画素に切り出して SAM の細かい段で詰め直す
+    (ComfyUI の SAM3 Detect の refine と同じ考え方)。戻り値: [H, W] の bool"""
+    import torch
+    x1, y1, x2, y2 = [float(v) for v in box]
+    bw, bh = x2 - x1, y2 - y1
+    pad = 0.1
+    cx1, cy1 = max(0, int(x1 - bw * pad)), max(0, int(y1 - bh * pad))
+    cx2, cy2 = min(W, int(x2 + bw * pad)), min(H, int(y2 + bh * pad))
+    coarse_full = F.interpolate(coarse_logits[None, None].float(), size=(H, W), mode="bilinear")[0, 0] > 0
+    if cx2 - cx1 < 8 or cy2 - cy1 < 8:
+        return coarse_full
+    crop = image_hwc[cy1:cy2, cx1:cx2, :3]
+    crop_1008 = comfy_utils.common_upscale(crop[None].movedim(-1, 1), 1008, 1008, "bilinear", crop="disabled").to(device=device, dtype=dtype)
+    mh, mw = coarse_logits.shape[-2:]
+    mx1, my1 = int(cx1 / W * mw), int(cy1 / H * mh)
+    mx2, my2 = max(mx1 + 1, int(cx2 / W * mw)), max(my1 + 1, int(cy2 / H * mh))
+    logit = coarse_logits[my1:my2, mx1:mx2][None, None].to(device=device, dtype=dtype)
+    for _ in range(REFINE_ITERS):
+        logit = sam.forward_segment(crop_1008, mask_inputs=F.interpolate(logit.float(), size=(1008, 1008), mode="bilinear").to(dtype))
+    refined = F.interpolate(logit.float(), size=(cy2 - cy1, cx2 - cx1), mode="bilinear")[0, 0] > 0
+    full = torch.zeros(H, W, dtype=torch.bool, device=refined.device)
+    full[cy1:cy2, cx1:cx2] = refined
+    return full if bool(full.any()) else coarse_full
+
+
+def clean_mask(m_u8, guide_u8, cv2, np):
+    """1 人分のマスク (0..255) を仕上げる: 内側の小さな穴を埋め、小さな切れ端を消し、元の絵の色の境目に縁を寄せる"""
+    H, W = m_u8.shape
+    b = m_u8 >= 128
+    area = int(b.sum())
+    if area < 64:
+        return m_u8
+    # 小さな切れ端 (本体の 0.5% 未満) を消す
+    n, lab, stats, _ = cv2.connectedComponentsWithStats(b.astype(np.uint8), connectivity=8)
+    for c in range(1, n):
+        if stats[c, cv2.CC_STAT_AREA] < area * 0.005:
+            b[lab == c] = False
+    # 内側の小さな穴 (外とつながっていない、本体の 2% 未満) を埋める。腕と体の間の大きなすき間は残す
+    inv = (~b).astype(np.uint8)
+    n, lab, stats, _ = cv2.connectedComponentsWithStats(inv, connectivity=4)
+    for c in range(1, n):
+        x, y, w, h, a = stats[c]
+        touches = x == 0 or y == 0 or x + w >= W or y + h >= H
+        if not touches and a < area * 0.02:
+            b[lab == c] = True
+    # 縁を元の絵の色の境目に寄せる (ガイデッドフィルタ)。少し締めて、ふわっと広がりすぎないようにする
+    r = max(2, int(round(min(H, W) / 200)))
+    gf = cv2.ximgproc.guidedFilter(guide_u8, b.astype(np.float32), r, (0.03 * 255) ** 2)
+    t = np.clip((gf - 0.2) / 0.6, 0.0, 1.0)
+    t = t * t * (3.0 - 2.0 * t)
+    return (t * 255.0 + 0.5).astype(np.uint8)
 
 
 def write_json(path, obj, must=False):
@@ -138,7 +195,7 @@ def main():
                     continue
                 inside = bool(m[int(py), int(px)])
                 d = 0.0 if inside else float(((xs.float() - px) ** 2 + (ys.float() - py) ** 2).min().sqrt())
-                found.append((inside, float(probs[i]), d, m))
+                found.append((inside, float(probs[i]), d, m, r["masks"][0][i], r["boxes"][0][i]))
             # 同じキャラを 2 回拾ったもの (大きく重なる) は、確からしい方だけ残す
             found.sort(key=lambda f: -f[1])
             uniq = []
@@ -147,7 +204,8 @@ def main():
                     uniq.append(f)
             # 点を含むもの → 点に近いもの の順。1 人目が「ピントを合わせたキャラ」
             uniq.sort(key=lambda f: (not f[0], f[2], -f[1]))
-            masks = [f[3] for f in uniq[:MAX_SUBJECTS]]
+            # 選んだキャラのマスクを SAM の細かい段で詰め直す (検出のマスクは粗い)
+            masks = [refine_mask(sam, images[k], f[4], f[5], H, W, device, dtype, F, comfy.utils) for f in uniq[:MAX_SUBJECTS]]
             how = f"text '{a.text}' ({len(found)} found, {len(masks)} used" + (", first contains point" if uniq and uniq[0][0] else "") + ")"
             if not masks:
                 # 文字で見つからなければ、点だけで 1 人
@@ -199,7 +257,14 @@ def main():
         if k > 0:
             track(list(range(k, -1, -1)))
 
-        # --- 3. 書き出す (RGB の PNG。OpenCV は BGR の順で書くので並べ替える) ---
+        # --- 3. 仕上げ: 穴を埋め、縁を元の絵の線画に寄せる (コマごと、キャラごと) ---
+        write_json(status, {"state": "running", "pid": os.getpid(), "stage": "clean", "progress": 0.95})
+        for i in range(N):
+            guide = (images[i].numpy() * 255.0 + 0.5).astype(np.uint8)
+            for s_ in range(S):
+                result[i, :, :, s_] = clean_mask(result[i, :, :, s_], guide, cv2, np)
+
+        # --- 4. 書き出す (RGB の PNG。OpenCV は BGR の順で書くので並べ替える) ---
         write_json(status, {"state": "running", "pid": os.getpid(), "stage": "write", "progress": 0.97})
         for i in range(N):
             cv2.imwrite(str(out / f"subject.{i + 1:05d}.png"), result[i][:, :, ::-1])

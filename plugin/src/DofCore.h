@@ -68,6 +68,11 @@ enum {
 struct DofParams {
 	int   focusMode;
 	float focusX, focusY;     /* Focus Point (レイヤー座標、ダウンサンプル後) */
+	/* ピント送り: Focus Point が動いている間は、動き始めの位置 A のピントから動き終わりの位置 B のピントへ、
+	   点の進み具合 (A→B の上での割合) に合わせて深度を移す。途中で通る背景にはピントを合わせない */
+	bool  focusMoving;
+	float focusAX, focusAY, focusBX, focusBY;
+	float focusT;             /* A→B の進み具合 (0..1。キーフレームのイーズがそのまま効く) */
 	float focusDepth;         /* Focus Mode = Depth のときの深度 (0..1、近い = 1) */
 	float focusRange;         /* ピントの合う幅 (深度の差がこれ以下ならぼかさない) */
 	int   subjectChannel;     /* Subject Layer の読み方 1: アルファ  2: 明るさ  3: Multi (RGB。赤・緑・青 = 1・2・3 人目のキャラ) */
@@ -741,11 +746,16 @@ inline float dfResolveFocus(DofContext &c, const float *low, const float *mask, 
 {
 	for (int s = 0; s < DF_MAX_SUBJECTS; ++s) c.subjectDepth[s] = mask ? dfSubjectMedian(low, mask, dw, dh, s) : -1.f;
 	if (c.p.focusMode != FOCUS_POINT) return c.p.focusDepth;
-	if (mask) {
-		const int s = dfPointSubject(mask, dw, dh, sx, sy, c.p.focusX, c.p.focusY);
-		if (s >= 0 && c.subjectDepth[s] >= 0.f) return c.subjectDepth[s];   /* キャラ全体にピントが合う */
-	}
-	return dfFocusFromPoint(low, dw, dh, sx, sy, c.p.focusX, c.p.focusY);
+	/* 点 (lx, ly) のピントの深度: キャラの上ならそのキャラの代表の深度 (キャラ全体にピントが合う)、そうでなければ点のまわりの深度 */
+	auto at = [&](float lx, float ly) {
+		if (mask) {
+			const int s = dfPointSubject(mask, dw, dh, sx, sy, lx, ly);
+			if (s >= 0 && c.subjectDepth[s] >= 0.f) return c.subjectDepth[s];
+		}
+		return dfFocusFromPoint(low, dw, dh, sx, sy, lx, ly);
+	};
+	if (c.p.focusMoving) return dfMix(at(c.p.focusAX, c.p.focusAY), at(c.p.focusBX, c.p.focusBY), dfSat(c.p.focusT));
+	return at(c.p.focusX, c.p.focusY);
 }
 
 /* ピントの深度を求める: Focus Point のまわりの深度の中央値。

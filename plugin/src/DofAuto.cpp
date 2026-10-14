@@ -1044,7 +1044,7 @@ static void ProcessSubjectJob(AEGP_SuiteHandler &suites, AutoJob &job, std::vect
 		job.cacheDir = g_cfg.cache + L"\\" + job.shotKey;
 		/* 同じ点・コマ・種類なら同じマスク (キャッシュを使う) */
 		wchar_t tag[96];
-		swprintf(tag, 96, L"subjects_%d_%d_f%ld_t%d",   /* 全員を別々に (RGB) にしてから名前を変えた (以前の白黒 1 人分は使わない) */ (int)std::lround(job.pointX), (int)std::lround(job.pointY),
+		swprintf(tag, 96, L"subjects2_%d_%d_f%ld_t%d",  /* マスクの作り方を変えたら名前の番号を上げる (2: 縁を線画に寄せる・穴を埋める) */ (int)std::lround(job.pointX), (int)std::lround(job.pointY),
 		         (long)job.promptFrame, job.subjectType);
 		job.subjectDir = job.cacheDir + L"\\" + tag;
 		AutoLog(L"subject: " + job.subjectDir);

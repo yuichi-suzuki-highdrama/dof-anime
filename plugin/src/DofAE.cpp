@@ -587,6 +587,54 @@ struct ParamReader {
 	}
 };
 
+/* Focus Point が動いているか調べ、動いていれば動き始めの位置 A と動き終わりの位置 B、その間の進み具合を p に入れる。
+   前後のコマの値を 1 コマずつたどり、値が止まった所 (キーフレームの位置や停止の間) を A・B とする。最大 FOCUS_SEARCH コマまで */
+static const int FOCUS_SEARCH = 240;
+
+static void ReadFocusPull(PF_InData *in_data, DofParams &p)
+{
+	p.focusMoving = false;
+	if (p.focusMode != FOCUS_POINT || in_data->time_step <= 0) return;
+	auto pointAt = [&](A_long t, float *xy) -> bool {
+		PF_ParamDef def;
+		AEFX_CLR_STRUCT(def);
+		if (PF_CHECKOUT_PARAM(in_data, DOF_FOCUS_POINT, t, in_data->time_step, in_data->time_scale, &def) != PF_Err_NONE) return false;
+		xy[0] = (float)FIX_2_FLOAT(def.u.td.x_value);
+		xy[1] = (float)FIX_2_FLOAT(def.u.td.y_value);
+		PF_CHECKIN_PARAM(in_data, &def);
+		return true;
+	};
+	auto same = [](const float *a, const float *b) { return fabsf(a[0] - b[0]) < 0.01f && fabsf(a[1] - b[1]) < 0.01f; };
+	const A_long t0 = in_data->current_time, dt = in_data->time_step;
+	float p0[2] = {p.focusX, p.focusY}, prev[2], next[2];
+	if (!pointAt(t0 - dt, prev) || !pointAt(t0 + dt, next)) return;
+	if (same(prev, p0) && same(next, p0)) return;   /* 止まっている */
+	/* 後ろへたどって、止まった所 = A */
+	float a[2] = {p0[0], p0[1]}, cur[2] = {p0[0], p0[1]};
+	for (int k = 1; k <= FOCUS_SEARCH; ++k) {
+		float q[2];
+		if (!pointAt(t0 - k * dt, q)) break;
+		if (same(q, cur)) break;
+		cur[0] = q[0]; cur[1] = q[1];
+		a[0] = q[0]; a[1] = q[1];
+	}
+	/* 前へたどって、止まった所 = B */
+	float b[2] = {p0[0], p0[1]};
+	cur[0] = p0[0]; cur[1] = p0[1];
+	for (int k = 1; k <= FOCUS_SEARCH; ++k) {
+		float q[2];
+		if (!pointAt(t0 + k * dt, q)) break;
+		if (same(q, cur)) break;
+		cur[0] = q[0]; cur[1] = q[1];
+		b[0] = q[0]; b[1] = q[1];
+	}
+	const float vx = b[0] - a[0], vy = b[1] - a[1], len2 = vx * vx + vy * vy;
+	if (len2 < 1.f) return;
+	p.focusMoving = true;
+	p.focusAX = a[0]; p.focusAY = a[1]; p.focusBX = b[0]; p.focusBY = b[1];
+	p.focusT = dfSat(((p0[0] - a[0]) * vx + (p0[1] - a[1]) * vy) / len2);
+}
+
 static PF_Err ReadDofParams(PF_InData *in_data, DofParams &p)
 {
 	ParamReader r(in_data);
@@ -594,6 +642,7 @@ static PF_Err ReadDofParams(PF_InData *in_data, DofParams &p)
 	float fp[2];
 	r.point2d(DOF_FOCUS_POINT, fp);
 	p.focusX = fp[0]; p.focusY = fp[1];
+	ReadFocusPull(in_data, p);
 	p.focusDepth  = dfSat(r.fs(DOF_FOCUS_DEPTH, DEF_FOCUS_DEPTH));
 	p.focusRange  = dfMax(0.f, r.fs(DOF_FOCUS_RANGE, DEF_FOCUS_RANGE));
 	p.subjectChannel = (int)r.popup(DOF_SUBJECT_CHANNEL, 1);
