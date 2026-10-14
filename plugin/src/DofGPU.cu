@@ -126,13 +126,22 @@ __global__ void kSubject(DofContext c, DfAuxMap map, float *subject)
 	subject[(size_t)y * c.outW + x] = dfSubjectAt(map, c.p.subjectChannel, x, y);
 }
 
-__global__ void kCoc(DofContext c, const float *depth, float *coc)
+__global__ void kSubjectLow(DfAuxMap depthMap, DfAuxMap map, int channel, int dw, int dh, float *mask)
+{
+	DF_XY(dw, dh);
+	mask[(size_t)y * dw + x] = dfSubjectAtLow(depthMap, map, channel, x, y);
+}
+
+/* ぼけの大きさ。マスクの中は深度を人物の代表の深度に寄せ (Subject Flatten)、Keep Subject Sharp の分だけぼけを減らす。
+   寄せた深度は depth に書き戻す (Output = Depth で見えるように) */
+__global__ void kCoc(DofContext c, float *depth, float *coc)
 {
 	DF_XY(c.outW, c.outH);
 	const size_t n = (size_t)y * c.outW + x;
-	float r = dfCoc(&c, depth[n]);
-	if (c.subject) r *= 1.f - dfSat(c.subject[n] * c.p.subjectAmount);
-	coc[n] = r;
+	const float s = c.subject ? c.subject[n] : 0.f;
+	const float d = dfSubjectBlendDepth(&c, depth[n], s);
+	depth[n] = d;
+	coc[n] = dfCoc(&c, d) * (1.f - dfSat(s * c.p.subjectAmount));
 }
 
 __global__ void kTileMax(DofContext c, float *tileMax)
@@ -209,7 +218,8 @@ int DofGPU_Render(DfGpuFrame &f, char *err, int errLen)
 	c.lutEnc = c.lutDec + DF_LUT_SIZE;
 	c.depth = c.coc = c.tileR = c.subject = NULL;
 	dfSetupFrame(c, c.p.focusDepth);
-	const bool hasSubject = f.subjectMap.img.data != NULL && c.p.subjectAmount > 0.f;
+	const bool hasSubject = f.subjectMap.img.data != NULL && (c.p.subjectAmount > 0.f || c.p.subjectFlatten > 0.f);
+	c.subjectDepth = -1.f;
 
 	const bool hasDepth = f.depthMap.img.data != NULL;
 	const int dw = f.depthMap.img.width, dh = f.depthMap.img.height;
@@ -220,7 +230,7 @@ int DofGPU_Render(DfGpuFrame &f, char *err, int errLen)
 	for (int k = 0; k < DF_LEVELS; ++k) count((size_t)c.lw[k] * c.lh[k] * 4);
 	if (hasDepth) {
 		count((size_t)dw * dh); count(NP); count(NP); count(NP);
-		if (hasSubject) count(NP);
+		if (hasSubject) { count(NP); count((size_t)dw * dh); }
 		count((size_t)c.tilesX * c.tilesY); count((size_t)c.tilesX * c.tilesY);
 	}
 	block = AcquireBlock(floats * sizeof(float));
@@ -246,13 +256,32 @@ int DofGPU_Render(DfGpuFrame &f, char *err, int errLen)
 		kLowDepth<<<Grid2(dw, dh), BLOCK2>>>(f.depthMap.img, nb, c.p.depthNear, c.p.passEncoding == 2, low);
 		DF_CHECK("depth");
 		float focus = c.p.focusDepth;
-		if (c.p.focusMode == FOCUS_POINT) {
-			/* ピントの深度は深度の点 (小さい) をホストへ写して求める */
+		if (c.p.focusMode == FOCUS_POINT || hasSubject) {
+			/* ピントの深度と人物の代表の深度は、深度の点 (小さい) をホストへ写して求める */
 			std::vector<float> host((size_t)dw * dh);
 			cudaMemcpy(host.data(), low, sizeof(float) * host.size(), cudaMemcpyDeviceToHost);
-			focus = dfFocusFromPoint(host.data(), dw, dh, f.depthMap.sx, f.depthMap.sy, c.p.focusX, c.p.focusY);
+			std::vector<float> hmask;
+			if (hasSubject) {
+				float *lowMask = cv.take((size_t)dw * dh);
+				kSubjectLow<<<Grid2(dw, dh), BLOCK2>>>(f.depthMap, f.subjectMap, c.p.subjectChannel, dw, dh, lowMask);
+				DF_CHECK("subject low");
+				hmask.resize((size_t)dw * dh);
+				cudaMemcpy(hmask.data(), lowMask, sizeof(float) * hmask.size(), cudaMemcpyDeviceToHost);
+				c.subjectDepth = dfSubjectMedian(host.data(), hmask.data(), dw, dh);
+			}
+			if (c.p.focusMode == FOCUS_POINT) {
+				/* Focus Point が人物の上なら、人物の代表の深度に合わせる (人物全体にピントが合う) */
+				if (c.subjectDepth >= 0.f && dfPointInSubject(hmask.data(), dw, dh, f.depthMap.sx, f.depthMap.sy, c.p.focusX, c.p.focusY))
+					focus = c.subjectDepth;
+				else
+					focus = dfFocusFromPoint(host.data(), dw, dh, f.depthMap.sx, f.depthMap.sy, c.p.focusX, c.p.focusY);
+			}
 		}
-		dfSetupFrame(c, focus);
+		{
+			const float sd = c.subjectDepth;
+			dfSetupFrame(c, focus);
+			c.subjectDepth = sd;
+		}
 		f.focusUsed = focus;
 
 		float *depth = cv.take(NP), *tmp = cv.take(NP), *coc = cv.take(NP);

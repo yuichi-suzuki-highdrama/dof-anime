@@ -48,7 +48,7 @@ int main(int argc, char **argv)
 	p.shape = SHAPE_CIRCLE; p.shapeRotation = 0.f; p.highlights = DEF_HIGHLIGHTS; p.highlightThreshold = DEF_HIGHLIGHT_THR;
 	p.quality = QUALITY_NORMAL; p.depthNear = 1; p.depthSnap = true; p.depthStabilize = 0; p.passEncoding = 1;
 	p.inputLinear = false; p.outputMode = OUTPUT_FINAL; p.mix = 1.f;
-	p.subjectChannel = 1; p.subjectAmount = 1.f;
+	p.subjectChannel = 1; p.subjectAmount = 0.f; p.subjectFlatten = 1.f;
 	std::vector<std::string> nbFiles;
 	std::string subjectFile;
 	for (int i = 6; i < argc; ++i) {
@@ -64,6 +64,7 @@ int main(int argc, char **argv)
 		else if (k == "nb") nbFiles.push_back(v);
 		else if (k == "subject") subjectFile = v;
 		else if (k == "keep") p.subjectAmount = f;
+		else if (k == "flatten") p.subjectFlatten = f;
 		else if (k == "fx") p.focusX = f;
 		else if (k == "fy") p.focusY = f;
 		else if (k == "fmode") p.focusMode = (int)f;

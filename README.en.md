@@ -53,7 +53,7 @@ To override settings for DoF Anime only, put key=value lines in `%APPDATA%\SRLM\
 2. Depth is generated and wired as a hidden "DoF depth" layer (instantly if cached).
 3. Drag the "Focus" frame in the Composition panel to what should be sharp.
 4. Set the amount with Blur Size; adjust near and far separately with Near Blur / Far Blur.
-5. To keep the whole character sharp, set Subject Layer to a cut-out of the character (for example a duplicate of the footage with Roto Brush). Estimated depth varies within a character (hair tips, legs, frills), so depth alone can blur parts of the body. Inside the matte there is no blur and near blur is not drawn over it.
+5. A character matte is generated automatically and wired to Subject Layer (Auto Subject; you can also pick a cut-out such as a Roto Brush layer yourself). Estimated depth varies within a character (hair tips, legs, frills), so depth inside the matte is pulled towards the character's representative depth (Subject Flatten). Put the Focus Point on the character to bring the whole character into focus; move it to the background and the character blurs evenly. Keep Subject Sharp (0% by default) forces the matte to stay sharp wherever the focus is.
 
 Output = Blur Map shows the blur size (near = blue, far = orange, in focus = black). Focus Check tints the in-focus area green.
 

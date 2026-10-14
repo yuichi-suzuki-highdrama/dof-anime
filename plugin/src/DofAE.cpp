@@ -154,6 +154,7 @@ static float RenderFrameCPU(DofContext &c, const DfImage &src, const DfAuxMap &d
 	c.lutEnc = c.lutDec + DF_LUT_SIZE;
 	c.depth = c.coc = c.tileR = c.subject = NULL;
 	dfSetupFrame(c, c.p.focusDepth);
+	c.subjectDepth = -1.f;
 
 	/* 1. リニアの色と縮小 */
 	std::vector<float> lin[DF_LEVELS];
@@ -180,9 +181,26 @@ static float RenderFrameCPU(DofContext &c, const DfImage &src, const DfAuxMap &d
 				low[(size_t)j * dw + i] = d;
 			}
 		});
-		if (c.p.focusMode == FOCUS_POINT)
-			focus = dfFocusFromPoint(low.data(), dw, dh, depthMap.sx, depthMap.sy, c.p.focusX, c.p.focusY);
-		dfSetupFrame(c, focus);
+		/* 人物の代表の深度 (マスクの中の深度の中央値) */
+		const bool hasSubject = subjectMap.img.data && (c.p.subjectAmount > 0.f || c.p.subjectFlatten > 0.f);
+		std::vector<float> lowMask;
+		if (hasSubject) {
+			lowMask.resize((size_t)dw * dh);
+			parallelRows(dh, [&](A_long j) { for (int i = 0; i < dw; ++i) lowMask[(size_t)j * dw + i] = dfSubjectAtLow(depthMap, subjectMap, c.p.subjectChannel, i, (int)j); });
+			c.subjectDepth = dfSubjectMedian(low.data(), lowMask.data(), dw, dh);
+		}
+		if (c.p.focusMode == FOCUS_POINT) {
+			/* Focus Point が人物の上なら、人物の代表の深度に合わせる (人物全体にピントが合う) */
+			if (c.subjectDepth >= 0.f && dfPointInSubject(lowMask.data(), dw, dh, depthMap.sx, depthMap.sy, c.p.focusX, c.p.focusY))
+				focus = c.subjectDepth;
+			else
+				focus = dfFocusFromPoint(low.data(), dw, dh, depthMap.sx, depthMap.sy, c.p.focusX, c.p.focusY);
+		}
+		{
+			const float sd = c.subjectDepth;
+			dfSetupFrame(c, focus);
+			c.subjectDepth = sd;
+		}
 
 		depth.resize(NP); tmp.resize(NP); coc.resize(NP);
 		parallelRows(H, [&](A_long y) {
@@ -193,8 +211,8 @@ static float RenderFrameCPU(DofContext &c, const DfImage &src, const DfAuxMap &d
 			parallelRows(H, [&](A_long y) { for (int x = 0; x < W; ++x) tmp[(size_t)y * W + x] = dfExpand1D(depth.data(), W, H, rad, true, x, (int)y); });
 			parallelRows(H, [&](A_long y) { for (int x = 0; x < W; ++x) depth[(size_t)y * W + x] = dfExpand1D(tmp.data(), W, H, rad, false, x, (int)y); });
 		}
-		/* キャラのマスクの中はぼかさない (深度がキャラの中で揺れても、体全体をくっきり残す) */
-		if (subjectMap.img.data && c.p.subjectAmount > 0.f) {
+		/* キャラのマスク。中の深度を人物の代表の深度に寄せ (Subject Flatten)、Keep Subject Sharp の分だけぼけを減らす */
+		if (hasSubject) {
 			subject.resize(NP);
 			parallelRows(H, [&](A_long y) { for (int x = 0; x < W; ++x) subject[(size_t)y * W + x] = dfSubjectAt(subjectMap, c.p.subjectChannel, x, (int)y); });
 			c.subject = subject.data();
@@ -202,9 +220,10 @@ static float RenderFrameCPU(DofContext &c, const DfImage &src, const DfAuxMap &d
 		parallelRows(H, [&](A_long y) {
 			for (int x = 0; x < W; ++x) {
 				const size_t n = (size_t)y * W + x;
-				float r = dfCoc(&c, depth[n]);
-				if (c.subject) r *= 1.f - dfSat(c.subject[n] * c.p.subjectAmount);
-				coc[n] = r;
+				const float s = c.subject ? c.subject[n] : 0.f;
+				const float d = dfSubjectBlendDepth(&c, depth[n], s);
+				depth[n] = d;
+				coc[n] = dfCoc(&c, d) * (1.f - dfSat(s * c.p.subjectAmount));
 			}
 		});
 		c.depth = depth.data();
@@ -355,8 +374,15 @@ static PF_Err ParamsSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef 
 	AEFX_CLR_STRUCT(def);
 	PF_ADD_POPUP("Subject Channel", 2, 1, "Alpha|Luminance", ID_SUBJECT_CHANNEL);
 
+	/* マスクの中の深度を、人物の代表の深度 (マスクの中の深度の中央値) に寄せる。100% で人物を 1 枚の板として扱う。
+	   Focus Point が人物の上なら人物全体にピントが合い、背景へ動かせば人物は全体が均一にぼける (ピント送りができる) */
 	AEFX_CLR_STRUCT(def);
-	PF_ADD_FLOAT_SLIDERX("Keep Subject Sharp", 0.f, 100.f, 0.f, 100.f, 100.f,
+	PF_ADD_FLOAT_SLIDERX("Subject Flatten", 0.f, 100.f, 0.f, 100.f, 100.f,
+		PF_Precision_INTEGER, PF_ValueDisplayFlag_PERCENT, 0, ID_SUBJECT_FLATTEN);
+
+	/* ピントに関係なく、マスクの中を必ずくっきり残す (手前のぼけも重ねない) */
+	AEFX_CLR_STRUCT(def);
+	PF_ADD_FLOAT_SLIDERX("Keep Subject Sharp", 0.f, 100.f, 0.f, 100.f, 0.f,
 		PF_Precision_INTEGER, PF_ValueDisplayFlag_PERCENT, 0, ID_SUBJECT_AMOUNT);
 
 	/* キャラのマスクを自動で作る (SAM 3.1)。深度ができたら、今の時刻の Focus Point にいるキャラを動画全体で追いかける。
@@ -566,7 +592,8 @@ static PF_Err ReadDofParams(PF_InData *in_data, DofParams &p)
 	p.focusDepth  = dfSat(r.fs(DOF_FOCUS_DEPTH, DEF_FOCUS_DEPTH));
 	p.focusRange  = dfMax(0.f, r.fs(DOF_FOCUS_RANGE, DEF_FOCUS_RANGE));
 	p.subjectChannel = (int)r.popup(DOF_SUBJECT_CHANNEL, 1);
-	p.subjectAmount  = dfSat(r.fs(DOF_SUBJECT_AMOUNT, 100.f) / 100.f);
+	p.subjectAmount  = dfSat(r.fs(DOF_SUBJECT_AMOUNT, 0.f) / 100.f);
+	p.subjectFlatten = dfSat(r.fs(DOF_SUBJECT_FLATTEN, 100.f) / 100.f);
 	p.blurSize    = dfMax(0.f, r.fs(DOF_BLUR_SIZE, DEF_BLUR_SIZE));
 	p.nearScale   = dfMax(0.f, r.fs(DOF_NEAR_BLUR, 1.f));
 	p.farScale    = dfMax(0.f, r.fs(DOF_FAR_BLUR, 1.f));

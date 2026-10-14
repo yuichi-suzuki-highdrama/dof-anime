@@ -71,7 +71,9 @@ struct DofParams {
 	float focusDepth;         /* Focus Mode = Depth のときの深度 (0..1、近い = 1) */
 	float focusRange;         /* ピントの合う幅 (深度の差がこれ以下ならぼかさない) */
 	int   subjectChannel;     /* Subject Layer の読み方 1: アルファ  2: 明るさ */
-	float subjectAmount;      /* Subject Layer の中をどれだけくっきり残すか (0..1) */
+	float subjectAmount;      /* Keep Subject Sharp: ピントに関係なく、マスクの中をどれだけくっきり残すか (0..1) */
+	float subjectFlatten;     /* Subject Flatten: マスクの中の深度を人物の代表の深度にどれだけ寄せるか (0..1)。
+	                             1 なら人物を 1 枚の板として扱い、人物の中のぼけのむらが無くなる */
 	float blurSize;           /* 深度の差 0.5 のときのぼけの半径 (1080p でのピクセル数) */
 	float nearScale;          /* 手前のぼけの倍率 */
 	float farScale;           /* 奥のぼけの倍率 */
@@ -256,6 +258,7 @@ struct DofContext {
 	const float *coc;         /* 符号付きのぼけの半径 (手前 = 負) */
 	const float *tileR;       /* 区画ごとの、届きうるぼけの最大の半径 */
 	const float *subject;     /* キャラのマスク (0..1、出力の大きさ。NULL なら無し) */
+	float subjectDepth;       /* 人物の代表の深度 (マスクの中の深度の中央値)。マスクが無ければ負 */
 	/* リニアの色 (premultiplied、RGBA の順に 4 個ずつ)。lin[0] が出力の大きさ、lin[k] は 1/2^k */
 	const float *lin[DF_LEVELS];
 	int   lw[DF_LEVELS], lh[DF_LEVELS];
@@ -375,11 +378,11 @@ DF_HD DF_INL float dfExpand1D(const float *in, int W, int H, int rad, bool horiz
 }
 
 /* キャラのマスク (Subject Layer) の 1 画素 (0..1)。深度と同じく、レイヤー全体を取り出して位置の割合で合わせる */
-DF_HD DF_INL float dfSubjectAt(const DfAuxMap &m, int channel, int x, int y)
+DF_HD DF_INL float dfSubjectAtF(const DfAuxMap &m, int channel, float fx, float fy)
 {
 	if (!m.img.data) return 0.f;
-	const float fx = dfClamp((float)x * m.sx + m.ox, 0.f, (float)(m.img.width - 1));
-	const float fy = dfClamp((float)y * m.sy + m.oy, 0.f, (float)(m.img.height - 1));
+	fx = dfClamp(fx, 0.f, (float)(m.img.width - 1));
+	fy = dfClamp(fy, 0.f, (float)(m.img.height - 1));
 	const int x0 = (int)fx, y0 = (int)fy;
 	const float tx = fx - (float)x0, ty = fy - (float)y0;
 	float v[4];
@@ -388,6 +391,26 @@ DF_HD DF_INL float dfSubjectAt(const DfAuxMap &m, int channel, int x, int y)
 		v[k] = channel == 2 ? 0.2126f * p.r + 0.7152f * p.g + 0.0722f * p.b : p.a;   /* 明るさは premultiplied のまま (透明な所は 0) */
 	}
 	return dfSat(dfMix(dfMix(v[0], v[1], tx), dfMix(v[2], v[3], tx), ty));
+}
+
+/* 出力の画素 (x, y) のマスク */
+DF_HD DF_INL float dfSubjectAt(const DfAuxMap &m, int channel, int x, int y)
+{
+	return dfSubjectAtF(m, channel, (float)x * m.sx + m.ox, (float)y * m.sy + m.oy);
+}
+
+/* 深度の点 (i, j) の位置のマスク。どちらもレイヤー全体を取り出しているので、レイヤーの中の位置の割合で合わせる */
+DF_HD DF_INL float dfSubjectAtLow(const DfAuxMap &depthMap, const DfAuxMap &m, int channel, int i, int j)
+{
+	const float rx = m.sx / dfMax(depthMap.sx, 1e-6f), ry = m.sy / dfMax(depthMap.sy, 1e-6f);
+	return dfSubjectAtF(m, channel, ((float)i + 0.5f) * rx - 0.5f, ((float)j + 0.5f) * ry - 0.5f);
+}
+
+/* マスクの中の深度を、人物の代表の深度へ寄せる (Subject Flatten)。s: その画素のマスク */
+DF_HD DF_INL float dfSubjectBlendDepth(const DofContext *c, float depth, float s)
+{
+	if (c->subjectDepth < 0.f || c->p.subjectFlatten <= 0.f) return depth;
+	return dfMix(depth, c->subjectDepth, dfSat(s * c->p.subjectFlatten));
 }
 
 /* ピントの深度からの差 → 符号付きのぼけの半径 (出力の画素。手前 = 負) */
@@ -646,6 +669,34 @@ DF_HD DF_INL DfRgba dfFinish(const DofContext *c, const float *lin, const DfRgba
 		o.a = dfMix(src.a, o.a, m); o.r = dfMix(src.r, o.r, m); o.g = dfMix(src.g, o.g, m); o.b = dfMix(src.b, o.b, m);
 	}
 	return o;
+}
+
+/* 人物の代表の深度: マスクが半分以上の深度の点の、深度の中央値 (1024 段の度数で)。点が少なければ -1 */
+inline float dfSubjectMedian(const float *low, const float *mask, int dw, int dh)
+{
+	static const int BINS = 1024;
+	int hist[BINS] = {0};
+	int n = 0;
+	for (int k = 0; k < dw * dh; ++k) {
+		if (mask[k] < 0.5f) continue;
+		hist[dfClamp((int)(dfSat(low[k]) * (BINS - 1) + 0.5f), 0, BINS - 1)]++;
+		++n;
+	}
+	if (n < 16) return -1.f;
+	int acc = 0;
+	for (int b = 0; b < BINS; ++b) {
+		acc += hist[b];
+		if (acc * 2 >= n) return (float)b / (float)(BINS - 1);
+	}
+	return -1.f;
+}
+
+/* Focus Point (レイヤー座標) がマスクの中か (深度の点で見る) */
+inline bool dfPointInSubject(const float *mask, int dw, int dh, float sx, float sy, float lx, float ly)
+{
+	const int i = dfClamp(dfRound((lx + 0.5f) * sx - 0.5f), 0, dw - 1);
+	const int j = dfClamp(dfRound((ly + 0.5f) * sy - 0.5f), 0, dh - 1);
+	return mask[(size_t)j * dw + i] >= 0.5f;
 }
 
 /* ピントの深度を求める: Focus Point のまわりの深度の中央値。
