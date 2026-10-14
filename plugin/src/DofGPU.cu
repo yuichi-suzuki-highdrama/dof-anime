@@ -192,6 +192,26 @@ __global__ void kCoc(DofContext c, const float *depth, const float *sharp, float
 	coc[n] = dfCoc(&c, depth[n]) * (1.f - dfSat(s * c.p.subjectAmount)) * (1.f - (sharp ? sharp[n] : 0.f));
 }
 
+/* Edge Bias / Edge Soften */
+__global__ void kEdgeBias(const float *in, float *out, int W, int H, float rad)
+{
+	DF_XY(W, H);
+	out[(size_t)y * W + x] = dfEdgeBias(in, W, H, rad, x, y);
+}
+
+__global__ void kSoftenH(const float *coc, float *out, int W, int H, float sigma)
+{
+	DF_XY(W, H);
+	out[(size_t)y * W + x] = dfSoften1D(coc, true, W, H, sigma, true, x, y);
+}
+
+__global__ void kSoftenV(const float *h, float *coc, int W, int H, float sigma)
+{
+	DF_XY(W, H);
+	const size_t n = (size_t)y * W + x;
+	coc[n] = dfSoftenApply(coc[n], dfSoften1D(h, false, W, H, sigma, false, x, y));
+}
+
 __global__ void kTileMax(DofContext c, float *tileMax)
 {
 	DF_XY(c.tilesX, c.tilesY);
@@ -281,6 +301,7 @@ int DofGPU_Render(DfGpuFrame &f, char *err, int errLen)
 		if (f.sharpMap.img.data || f.blurMap.img.data) { count(NP); count(NP); }
 		if (hasSubject) { count(NP); count(NP); count(NP); count(NP); count((size_t)dw * dh * 3); }
 		count((size_t)c.tilesX * c.tilesY); count((size_t)c.tilesX * c.tilesY);
+		if (c.p.edgeBias > 0.f || c.p.edgeSoften > 0.f) count(NP);
 	}
 	block = AcquireBlock(floats * sizeof(float));
 	if (!block) { if (err) snprintf(err, errLen, "work alloc failed (%zu MB)", floats * 4 / 1048576); return -2; }
@@ -366,6 +387,19 @@ int DofGPU_Render(DfGpuFrame &f, char *err, int errLen)
 		}
 		kCoc<<<Grid2(W, H), BLOCK2>>>(c, depth, sharpB, coc);
 		DF_CHECK("coc");
+		/* 縁の仕上げ (Edge Bias → Edge Soften)。tmp と作業用の 1 枚を使う */
+		if (c.bias >= 0.5f || c.soften >= 0.5f) {
+			float *work = cv.take(NP);
+			if (c.bias >= 0.5f) {
+				kEdgeBias<<<Grid2(W, H), BLOCK2>>>(coc, work, W, H, c.bias);
+				cudaMemcpy(coc, work, sizeof(float) * NP, cudaMemcpyDeviceToDevice);
+			}
+			if (c.soften >= 0.5f) {
+				kSoftenH<<<Grid2(W, H), BLOCK2>>>(coc, work, W, H, c.soften);
+				kSoftenV<<<Grid2(W, H), BLOCK2>>>(work, coc, W, H, c.soften);
+			}
+			DF_CHECK("edge");
+		}
 		c.depth = depth;
 		c.coc = coc;
 

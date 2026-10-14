@@ -61,6 +61,8 @@ enum {
 	DOF_NEAR_BLUR,
 	DOF_FAR_BLUR,
 	DOF_EDGE_EXPAND,
+	DOF_EDGE_BIAS,            /* ぼけている側をくっきりした側へ食い込ませる幅 */
+	DOF_EDGE_SOFTEN,          /* くっきりした物の縁から内側へ、ぼけを少しずつ弱めていく幅 */
 	DOF_TOPIC_BLUR_END,
 
 	/* --- Bokeh --- */
@@ -123,6 +125,8 @@ enum {
 	ID_NEAR_BLUR,
 	ID_FAR_BLUR,
 	ID_EDGE_EXPAND,
+	ID_EDGE_BIAS,
+	ID_EDGE_SOFTEN,
 	ID_TOPIC_BLUR_END,
 
 	ID_TOPIC_BOKEH = 70,

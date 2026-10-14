@@ -85,6 +85,8 @@ int main(int argc, char **argv)
 		else if (k == "near") p.nearScale = f;
 		else if (k == "far") p.farScale = f;
 		else if (k == "expand") p.edgeExpand = f;
+		else if (k == "bias") p.edgeBias = f;
+		else if (k == "soften") p.edgeSoften = f;
 		else if (k == "shape") p.shape = (int)f;
 		else if (k == "rot") p.shapeRotation = f;
 		else if (k == "hl") p.highlights = f;

@@ -92,6 +92,8 @@ struct DofParams {
 	float nearScale;          /* 手前のぼけの倍率 */
 	float farScale;           /* 奥のぼけの倍率 */
 	float edgeExpand;         /* 手前の物の輪郭を広げる幅 (1080p でのピクセル数。輪郭線を手前の物に含める) */
+	float edgeBias;           /* Edge Bias: ぼけている側を、くっきりした側へ食い込ませる幅 (1080p でのピクセル数) */
+	float edgeSoften;         /* Edge Soften: くっきりした物の縁から内側へ、ぼけを少しずつ弱めていく幅 (1080p でのピクセル数) */
 	int   shape;
 	float shapeRotation;      /* 度 */
 	float highlights;         /* 明るい所を玉ぼけにする強さ */
@@ -271,6 +273,8 @@ struct DofContext {
 	float maxCoc;             /* ぼけの半径の上限 (出力の画素) */
 	float expand;             /* 手前の輪郭を広げる幅 (出力の画素) */
 	float step;               /* 深度の段差を締めるときに見るまわりの半径 (出力の画素) */
+	float bias;               /* Edge Bias (出力の画素) */
+	float soften;             /* Edge Soften (出力の画素) */
 	int   maxSamples;
 	int   polySides;          /* 0 = 円 */
 	float polyRot;            /* ラジアン */
@@ -299,6 +303,8 @@ inline void dfSetupFrame(DofContext &c, float focusDepth)
 	c.maxCoc     = DF_MAX_COC_1080 * s;
 	c.expand     = dfMax(0.f, c.p.edgeExpand) * s;
 	c.step       = DF_STEP_1080 * s;
+	c.bias       = dfMax(0.f, c.p.edgeBias) * s;
+	c.soften     = dfMax(0.f, c.p.edgeSoften) * s;
 	c.maxSamples = dfMaxSamples(c.p.quality);
 	c.polySides  = c.p.shape == SHAPE_HEXAGON ? 6 : (c.p.shape == SHAPE_OCTAGON ? 8 : 0);
 	c.polyRot    = c.p.shapeRotation * 3.14159265f / 180.f;
@@ -560,6 +566,49 @@ DF_HD DF_INL float dfCoc(const DofContext *c, float depth)
 	const float r = dfMin(c->maxCoc, over * ramp * c->cocScale * (delta > 0.f ? c->p.nearScale : c->p.farScale));
 	return delta > 0.f ? -r : r;
 }
+
+/*
+ * 縁の仕上げ。深度の地図は粗く、ぼけの境目が絵の輪郭線から 1〜3 画素ずれる。ずれた分の背景はくっきりのまま残り、
+ * 輪郭に沿った細い帯に見える。
+ *   Edge Bias:   ぼけている側をくっきりした側へ rad 画素食い込ませる (帯がぼけに入る。輪郭線のいちばん外も少しぼける)
+ *   Edge Soften: くっきりした物の縁から内側へ、奥のぼけを少しずつ弱めながら入れる (縁をふわっとつなぐ)
+ */
+static constexpr float DF_BIAS_MIN_DIFF = 1.5f;   /* Edge Bias: これより大きくぼけが違う隣だけを境目とみなす (なだらかな所は変えない) */
+
+/* Edge Bias: まわり (半径 rad の円) で、自分よりはっきり大きくぼけている画素のぼけを使う */
+DF_HD DF_INL float dfEdgeBias(const float *coc, int W, int H, float rad, int x, int y)
+{
+	const float c0 = coc[(size_t)y * W + x];
+	float best = c0;
+	const int r = (int)ceilf(rad);
+	for (int j = -r; j <= r; ++j)
+		for (int i = -r; i <= r; ++i) {
+			if ((float)(i * i + j * j) > rad * rad + 0.25f) continue;
+			const float q = coc[(size_t)dfClamp(y + j, 0, H - 1) * W + dfClamp(x + i, 0, W - 1)];
+			if (fabsf(q) > fabsf(best) && fabsf(q) > fabsf(c0) + DF_BIAS_MIN_DIFF) best = q;
+		}
+	return best;
+}
+
+/* Edge Soften: 奥のぼけ (正) をガウスでならす (横、縦の 2 回)。最初の回は coc から、2 回目は 1 回目の結果から */
+DF_HD DF_INL float dfSoften1D(const float *in, bool first, int W, int H, float sigma, bool horizontal, int x, int y)
+{
+	const int r = (int)ceilf(sigma * 2.5f);
+	const float k = -0.5f / dfMax(sigma * sigma, 1e-4f);
+	float sum = 0.f, ws = 0.f;
+	for (int i = -r; i <= r; ++i) {
+		const int xx = horizontal ? dfClamp(x + i, 0, W - 1) : x;
+		const int yy = horizontal ? y : dfClamp(y + i, 0, H - 1);
+		const float v = in[(size_t)yy * W + xx];
+		const float g = expf(k * (float)(i * i));
+		sum += (first ? dfMax(v, 0.f) : v) * g;
+		ws += g;
+	}
+	return sum / ws;
+}
+
+/* ならした奥のぼけ soft を、くっきりした側へ入れる (大きくする方だけ。手前のぼけ (負) はそのまま) */
+DF_HD DF_INL float dfSoftenApply(float coc, float soft) { return coc >= 0.f ? dfMax(coc, soft) : coc; }
 
 /* ------------------------------------------------------------------ */
 /* 色 (リニア、premultiplied)                                            */

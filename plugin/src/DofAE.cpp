@@ -47,6 +47,8 @@ static const float DEF_FOCUS_RANGE     = 0.06f;
 static const float DEF_FOCUS_PULL      = 0.8f;    /* ピント送りにかける時間 (秒) */
 static const float DEF_BLUR_SIZE       = 30.f;
 static const float DEF_EDGE_EXPAND     = 2.f;
+static const float DEF_EDGE_BIAS       = 1.5f;
+static const float DEF_EDGE_SOFTEN     = 2.f;
 static const float DEF_HIGHLIGHTS      = 1.f;
 static const float DEF_HIGHLIGHT_THR   = 0.75f;
 
@@ -281,6 +283,17 @@ static float RenderFrameCPU(DofContext &c, const DfImage &src, const DfAuxMap &d
 				coc[n] = dfCoc(&c, depth[n]) * (1.f - dfSat(s * c.p.subjectAmount)) * (1.f - (hasSharp ? sharpB[n] : 0.f));
 			}
 		});
+		/* 縁の仕上げ (Edge Bias → Edge Soften)。tmp を作業に使う */
+		if (c.bias >= 0.5f) {
+			parallelRows(H, [&](A_long y) { for (int x = 0; x < W; ++x) tmp[(size_t)y * W + x] = dfEdgeBias(coc.data(), W, H, c.bias, x, (int)y); });
+			coc.swap(tmp);
+		}
+		if (c.soften >= 0.5f) {
+			parallelRows(H, [&](A_long y) { for (int x = 0; x < W; ++x) tmp[(size_t)y * W + x] = dfSoften1D(coc.data(), true, W, H, c.soften, true, x, (int)y); });
+			parallelRows(H, [&](A_long y) {
+				for (int x = 0; x < W; ++x) { const size_t n = (size_t)y * W + x; coc[n] = dfSoftenApply(coc[n], dfSoften1D(tmp.data(), false, W, H, c.soften, false, x, (int)y)); }
+			});
+		}
 		c.depth = depth.data();
 		c.coc = coc.data();
 
@@ -496,6 +509,16 @@ static PF_Err ParamsSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef 
 	AEFX_CLR_STRUCT(def);
 	PF_ADD_FLOAT_SLIDERX("Edge Expand", 0.f, 12.f, 0.f, 6.f, DEF_EDGE_EXPAND,
 		PF_Precision_TENTHS, PF_ValueDisplayFlag_PIXEL, 0, ID_EDGE_EXPAND);
+
+	/* 深度の地図の境目は絵の輪郭線から 1〜3 画素ずれ、ずれた分の背景がくっきりした細い帯になる。
+	   Edge Bias: ぼけている側をくっきりした側へその幅だけ食い込ませる (帯が消える。輪郭線のいちばん外も少しぼける)。
+	   Edge Soften: くっきりした物の縁から内側へ、その幅でぼけを少しずつ弱める (縁がふわっとつながる) */
+	AEFX_CLR_STRUCT(def);
+	PF_ADD_FLOAT_SLIDERX("Edge Bias", 0.f, 8.f, 0.f, 4.f, DEF_EDGE_BIAS,
+		PF_Precision_TENTHS, PF_ValueDisplayFlag_PIXEL, 0, ID_EDGE_BIAS);
+	AEFX_CLR_STRUCT(def);
+	PF_ADD_FLOAT_SLIDERX("Edge Soften", 0.f, 16.f, 0.f, 8.f, DEF_EDGE_SOFTEN,
+		PF_Precision_TENTHS, PF_ValueDisplayFlag_PIXEL, 0, ID_EDGE_SOFTEN);
 
 	AEFX_CLR_STRUCT(def);
 	PF_END_TOPIC(ID_TOPIC_BLUR_END);
@@ -773,6 +796,8 @@ static PF_Err ReadDofParams(PF_InData *in_data, DofParams &p)
 	p.nearScale   = dfMax(0.f, r.fs(DOF_NEAR_BLUR, 0.f));
 	p.farScale    = dfMax(0.f, r.fs(DOF_FAR_BLUR, 1.f));
 	p.edgeExpand  = dfMax(0.f, r.fs(DOF_EDGE_EXPAND, DEF_EDGE_EXPAND));
+	p.edgeBias    = dfMax(0.f, r.fs(DOF_EDGE_BIAS, DEF_EDGE_BIAS));
+	p.edgeSoften  = dfMax(0.f, r.fs(DOF_EDGE_SOFTEN, DEF_EDGE_SOFTEN));
 	p.shape       = (int)r.popup(DOF_SHAPE, SHAPE_CIRCLE);
 	p.shapeRotation = r.angle(DOF_SHAPE_ROTATION, 0.f);
 	p.highlights  = dfMax(0.f, r.fs(DOF_HIGHLIGHTS, DEF_HIGHLIGHTS));
