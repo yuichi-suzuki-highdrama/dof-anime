@@ -464,7 +464,9 @@ static PF_Err ParamsSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef 
 	/* キャラのマスクを自動で作る (SAM 3.1)。深度ができたら、今の時刻の Focus Point にいるキャラを動画全体で追いかける。
 	   別のキャラにピントを移したら Generate Subject で作り直す */
 	AEFX_CLR_STRUCT(def);
-	PF_ADD_CHECKBOXX("Auto Subject", TRUE, 0, ID_AUTO_SUBJECT);
+	/* 既定は切 (深度だけでぼかす。縁の仕上げと合わせると、マスクありよりなめらかなことが多い)。
+	   キャラ全体をそろえてくっきりさせたいときは入にするか、Generate Subject を押す */
+	PF_ADD_CHECKBOXX("Auto Subject", FALSE, 0, ID_AUTO_SUBJECT);
 
 	AEFX_CLR_STRUCT(def);
 	PF_ADD_POPUP("Subject Type", 3, 1, "Anime Character|Person|Animal", ID_SUBJECT_TYPE);

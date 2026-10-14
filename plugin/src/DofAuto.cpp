@@ -887,7 +887,7 @@ static void CollectSubjectEffects(AEGP_SuiteHandler &suites, AEGP_LayerH layerH,
 		if (suites.EffectSuite4()->AEGP_GetLayerEffectByIndex(g_pluginId, layerH, i, &eH) != A_Err_NONE || !eH) continue;
 		bool keep = false;
 		if (EffectIsOurs(suites, eH) && GetStreamLayerId(suites, eH, L"Depth Layer") != 0) {
-			const bool autoOn = GetStreamOneD(suites, eH, L"Auto Subject", 1.0) >= 0.5;
+			const bool autoOn = GetStreamOneD(suites, eH, L"Auto Subject", 0.0) >= 0.5;
 			const AEGP_LayerIDVal sid = GetStreamLayerId(suites, eH, L"Subject Layer");
 			const bool missing = autoOn && sid != 0 && DepthSourceMissing(suites, layerH, sid);
 			keep = force || (autoOn && (sid == 0 || missing));

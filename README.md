@@ -53,7 +53,7 @@ DoF Anime だけ設定を変えたいときは、`%APPDATA%\SRLM\DoFAnime.ini` �
 2. 深度が自動で作られ、非表示の「DoF depth」レイヤーとして結線されます（キャッシュがあればすぐ）。
 3. コンポビューの「Focus」の枠をピントを合わせたい所へドラッグします。
 4. Blur Size でぼけの大きさを決めます。手前と奥は Near Blur / Far Blur で別に調整できます。
-5. キャラのマスクは自動で作られ、Subject Layer に結線されます（Auto Subject。ロトブラシなどで切り抜いたレイヤーを手で指定してもかまいません）。推定した深度はキャラの中でも揺れる（髪の先・脚・フリル）ので、マスクの中の深度をキャラの代表の深度に寄せます（Subject Flatten）。Focus Point をキャラの上に置けばキャラ全体にピントが合い、背景へ動かせばキャラは全体が均一にぼけます。
+5. 既定ではキャラのマスクを使わず、深度だけでぼかします（縁は Edge Bias / Edge Soften でなめらかにつなぎます）。キャラ全体をそろえてくっきりさせたいときは、Auto Subject を入れるか Generate Subject を押すと、キャラのマスクが作られて Subject Layer に結線されます（ロトブラシなどで切り抜いたレイヤーを手で指定してもかまいません）。推定した深度はキャラの中でも揺れる（髪の先・脚・フリル）ので、マスクの中の深度をキャラの代表の深度に寄せます（Subject Flatten）。Focus Point をキャラの上に置けばキャラ全体にピントが合い、背景へ動かせばキャラは全体が均一にぼけます。
 
 Output を Blur Map にすると、ぼけの大きさが見えます（手前 = 青、奥 = 橙、ピント = 黒）。Focus Check はピントの合っている所を緑で示します。
 
@@ -72,7 +72,7 @@ Output を Blur Map にすると、ぼけの大きさが見えます（手前 = 
 | | Keep Subject Sharp | ピントに関係なく、マスクの中を必ずくっきり残す強さ（手前のぼけも重ねない）。既定は 0% |
 | | Sharp Layer / Blur Layer | 手直し。自動で拾えない所を、平面にマスクを描いて指定する（アルファの所が対象）。Sharp Layer の所は必ずくっきり、Blur Layer の所は画面のいちばん奥と同じだけぼかす |
 | | Sharp by Text / Blur by Text | 「Text...」を押して物の名前を英語で入れると（例: flower, grass。カンマで複数）、SAM 3.1 がその物を動画全体で探して追いかけ、マスクを作って Sharp Layer / Blur Layer に結線する。「Focus Point の所の物を 1 つだけ」を選べば、その所の 1 つだけ |
-| | Auto Subject / Subject Type / Generate Subject | キャラのマスクを自動で作る（SAM 3.1 でキャラを見つけて動画全体で追いかけ、深度で大きな取りこぼし・拾いすぎを直し、縁を元の絵の色から切り抜き直す）。別のキャラにピントを移したら Generate Subject で作り直す。縁の仕上げ方は設定ファイル（%APPDATA%\SRLM\DoFAnime.ini）の `subject_matte` で変えられる: `depthcf`（既定）/ `cf`（深度を使わない）/ `sam2matting`（いちばんきれいだが**非商用**）/ `none` |
+| | Auto Subject / Subject Type / Generate Subject | キャラのマスクを自動で作る（既定は切。SAM 3.1 でキャラを見つけて動画全体で追いかけ、深度で大きな取りこぼし・拾いすぎを直し、縁を元の絵の色から切り抜き直す）。別のキャラにピントを移したら Generate Subject で作り直す。縁の仕上げ方は設定ファイル（%APPDATA%\SRLM\DoFAnime.ini）の `subject_matte` で変えられる: `depthcf`（既定）/ `cf`（深度を使わない）/ `sam2matting`（いちばんきれいだが**非商用**）/ `none` |
 | Blur | Blur Size | ピントから深度が 0.5 離れた所のぼけの半径（1080p でのピクセル数） |
 | | Near Blur / Far Blur | 手前 / 奥のぼけの倍率。Near Blur の既定は 0（手前はぼかさず奥だけ）。手前ボケが欲しいカットだけ上げる |
 | | Edge Expand | 手前の物の輪郭を広げる幅。推定した深度の境目より外にある輪郭線を、手前の物に入れる |
