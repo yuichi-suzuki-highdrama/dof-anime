@@ -63,9 +63,10 @@ struct AutoConfig {
 	std::wstring subjectPython = L"C:\\ComfyUI_windows_portable\\python_embeded\\python.exe";
 	std::wstring subjectScript = L"C:\\dev\\DepthOfFieldAEPlugin\\tools\\subject_mask.py";
 	std::wstring comfyuiDir    = L"C:\\ComfyUI_windows_portable\\ComfyUI";
-	/* キャラのマスクの切り抜き方: sam2matting (SAM2Matting で髪の毛先まで切り抜く。CC BY-NC 4.0 = 営利目的では使えない)
-	   / none (SAM 3.1 の追跡だけ)。設定の subject_matte で変える */
-	std::wstring subjectMatte  = L"sam2matting";
+	/* キャラのマスクの縁の仕上げ方 (設定の subject_matte で変える。tools/subject_mask.py の --matte):
+	   depthcf (既定。マスクと深度を混ぜて直し、縁を元の絵の色から切り抜く) / cf (縁だけ) /
+	   sam2matting (SAM2Matting。いちばんきれいだが CC BY-NC 4.0 = 営利目的では使えない) / none (ガイデッドフィルタだけ) */
+	std::wstring subjectMatte  = L"depthcf";
 	bool loaded = false;
 };
 
@@ -119,7 +120,9 @@ static void LoadIni(const std::wstring &ini)
 		else if (k == L"subject_python") g_cfg.subjectPython = v;
 		else if (k == L"subject_script") g_cfg.subjectScript = v;
 		else if (k == L"comfyui_dir") g_cfg.comfyuiDir = v;
-		else if (k == L"subject_matte") g_cfg.subjectMatte = (v == L"none") ? L"none" : L"sam2matting";
+		else if (k == L"subject_matte") {
+			if (v == L"depthcf" || v == L"cf" || v == L"sam2matting" || v == L"none") g_cfg.subjectMatte = v;
+		}
 	}
 }
 
@@ -1048,9 +1051,9 @@ static void ProcessSubjectJob(AEGP_SuiteHandler &suites, AutoJob &job, std::vect
 		job.cacheDir = g_cfg.cache + L"\\" + job.shotKey;
 		/* 同じ点・コマ・種類なら同じマスク (キャッシュを使う) */
 		wchar_t tag[96];
-		/* マスクの作り方を変えたら名前の番号を上げる (2: 縁を線画に寄せる・穴を埋める、3: 切り抜き方 (SAM2Matting か SAM 3.1 だけか) を名前に入れる) */
+		/* マスクの作り方を変えたら名前の番号を上げる (2: 縁を線画に寄せる・穴を埋める、3: 縁の仕上げ方 (subject_matte) を名前に入れる) */
 		swprintf(tag, 96, L"subjects3_%d_%d_f%ld_t%d_%ls", (int)std::lround(job.pointX), (int)std::lround(job.pointY),
-		         (long)job.promptFrame, job.subjectType, g_cfg.subjectMatte == L"none" ? L"sam" : L"matte");
+		         (long)job.promptFrame, job.subjectType, g_cfg.subjectMatte.c_str());
 		job.subjectDir = job.cacheDir + L"\\" + tag;
 		AutoLog(L"subject: " + job.subjectDir);
 		if (FileExists(job.subjectDir + L"\\manifest.json")) {

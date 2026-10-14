@@ -8,21 +8,26 @@ subject_mask.py - ピントを合わせるキャラのマスクを、動画全�
 手順:
   1. --frame のコマで、--text の文字でキャラを全員検出する (SAM 3.1)。--point (Focus Point、素材の画素) を含むキャラを 1 人目にし、
      残りは点に近い順に 3 人まで。文字で見つからなければ、点だけで 1 人分のマスクを作る
-  2. そのマスクから、キャラごとに別々に動画全体を追いかける。--matte sam2matting (既定) なら SAM2Matting (SAM3 版) で、
-     元の絵に合わせた切り抜き (髪の毛先・輪郭線まで、半透明の縁つき) にしながら追いかける。手前にある草や花はキャラから外れる。
-     --matte none なら SAM 3.1 の動画の追跡。--frame が 0 でなければ、前へも逆順に追いかける
+  2. そのマスクから、キャラごとに別々に動画全体を追いかける (SAM 3.1 の動画の追跡)。--frame が 0 でなければ、前へも逆順に追いかける。
+     --matte で縁の仕上げ方を選ぶ:
+       depthcf (既定): マスクと深度を混ぜる。マスクの中で深度がまわりのキャラより明らかに奥の大きな塊は外し
+                       (浴槽の内側など)、マスクのすぐ外で深度がキャラと同じ高さの大きな塊は足す (取りこぼし)。
+                       そのあと縁の数画素を、元の絵の色から切り抜き直す (クローズドフォーム・マッティング、pymatting)。
+                       深度は --depth-dir (無ければ --out-dir の隣の depth) の depth.%05d.png。無ければ cf と同じ
+       cf:          深度を使わず、縁だけクローズドフォームで切り抜き直す
+       sam2matting: 追跡と切り抜きを SAM2Matting (SAM3 版) で行う。いちばんきれいだが CC BY-NC 4.0 (営利目的では使えない)
+       none:        元の絵をガイドにしたガイデッドフィルタで縁を線画に寄せるだけ
   3. 1 コマずつ subject.%05d.png に書く。RGB の PNG で、赤 = 1 人目、緑 = 2 人目、青 = 3 人目のマスク (白 = キャラ)。
      DoF Anime は Subject Channel = Multi (RGB) で読み、キャラごとに自分の代表の深度へ寄せる。
   素材は動画でも静止画 (png / jpg / webp など) でもよい。
   マスクは仕上げに、(a) 検出したマスクを SAM の細かい段 (1008 画素、キャラの周りを切り出して) で詰め直し、
-  (b) キャラの内側の小さな穴を埋めて小さな切れ端を消す。縁は、SAM2Matting なら縁の数画素だけ切り抜きの半透明の値を残し
-  (迷った所のぼやけたシミは消える)、SAM 3.1 なら元の絵をガイドにしたガイデッドフィルタで線画に寄せる。
+  (b) キャラの内側の小さな穴を埋めて小さな切れ端を消し、(c) 上の --matte のやり方で縁を仕上げる。
 
 SAM 3.1 は ComfyUI に入っている実装と重み (models/checkpoints/sam3.1_multiplex_fp16.safetensors) を、
 ComfyUI を立ち上げずに部品として使う。ComfyUI の Python (python_embeded) で動かすこと。
 SAM 3 は Meta の SAM License (https://github.com/facebookresearch/sam3/blob/main/LICENSE)。
 SAM2Matting は ComfyUI-SAM2Matting (custom_nodes) の実装と重み (models/sam2matting/SAM2Matting-SAM3.pt) を使う。
-SAM2Matting は CC BY-NC 4.0 (営利目的では使えない)。営利の仕事では --matte none にすること。
+SAM2Matting は CC BY-NC 4.0 (営利目的では使えない)。既定の depthcf / cf / none は SAM 3.1 と pymatting (MIT) だけを使う。
 
 進み具合は --status (status.json) に書く (DoF Anime の進み具合の窓が読む)。終わったら manifest.json を書く。
 """
@@ -116,6 +121,102 @@ def clean_matte(m_u8, cv2, np, band=2.5):
     return (out * 255.0 + 0.5).astype(np.uint8)
 
 
+CF_BAND = 5   # クローズドフォームで計算し直す縁の幅 (画素、内と外それぞれ)
+
+
+def clean_binary(m_u8, cv2, np):
+    """マスク (0..255) を 2 値にし、小さな切れ端 (本体の 0.5% 未満) を消し、内側の小さな穴 (2% 未満) を埋める"""
+    H, W = m_u8.shape
+    b = (m_u8 >= 128)
+    area = int(b.sum())
+    if area < 64:
+        return b.astype(np.uint8)
+    n, lab, stats, _ = cv2.connectedComponentsWithStats(b.astype(np.uint8), connectivity=8)
+    for c in range(1, n):
+        if stats[c, cv2.CC_STAT_AREA] < area * 0.005:
+            b[lab == c] = False
+    n, lab, stats, _ = cv2.connectedComponentsWithStats((~b).astype(np.uint8), connectivity=4)
+    for c in range(1, n):
+        x, y, w, h, ar = stats[c]
+        if not (x == 0 or y == 0 or x + w >= W or y + h >= H) and ar < area * 0.02:
+            b[lab == c] = True
+    return b.astype(np.uint8)
+
+
+DEPTH_GROW = 40         # マスクの外へ足す範囲 (画素)
+DEPTH_T_ADD = 0.04      # まわりのキャラの深度とこれ以内なら、キャラとつながっているとみなして足す (手前の物は足さない)
+DEPTH_T_RM = 0.10       # まわりのキャラの深度よりこれ以上奥なら、キャラではないとみなして外す
+DEPTH_MIN_ADD = 0.005   # 足す塊の最小の大きさ (キャラの面積に対する割合)
+DEPTH_MIN_RM = 0.002    # 外す塊の最小の大きさ
+DEPTH_OPEN_R = 6        # 深度のにじみ (細い帯) を無視する半径 (画素)
+
+
+def depth_fix(b, depth, cv2, np):
+    """2 値のマスク b を深度で直す。depth: [H, W] 0..1 (近い = 1)。深度の地図は粗いので、大きな塊だけ足し引きする"""
+    area = int(b.sum())
+    if area < 64:
+        return b
+    bf = b.astype(np.float32)
+    # その場所での「キャラの深度」: マスクの中の深度を、まわりへ広げてならしたもの
+    num = cv2.GaussianBlur(depth * bf, (0, 0), 25)
+    den = cv2.GaussianBlur(bf, (0, 0), 25)
+    ref = num / np.maximum(den, 1e-4)
+    ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * DEPTH_OPEN_R + 1, 2 * DEPTH_OPEN_R + 1))
+    dist = cv2.distanceTransform(1 - b, cv2.DIST_L2, 3)
+    add = ((b == 0) & (dist <= DEPTH_GROW) & (np.abs(depth - ref) < DEPTH_T_ADD) & (den > 0.02)).astype(np.uint8)
+    rm = ((b > 0) & (depth < ref - DEPTH_T_RM)).astype(np.uint8)
+    nb = b.copy()
+    for m_, val, min_a in ((cv2.morphologyEx(add, cv2.MORPH_OPEN, ker), 1, DEPTH_MIN_ADD),
+                           (cv2.morphologyEx(rm, cv2.MORPH_OPEN, ker), 0, DEPTH_MIN_RM)):
+        n, lab, st, _ = cv2.connectedComponentsWithStats(m_, connectivity=8)
+        for c in range(1, n):
+            if st[c, cv2.CC_STAT_AREA] >= area * min_a:
+                nb[lab == c] = val
+    return nb
+
+
+CF_BAND = 5   # クローズドフォームで計算し直す縁の幅 (画素、内と外それぞれ)
+
+
+def cf_matte(b, img, cv2, np):
+    """2 値のマスク b の縁から CF_BAND 画素の内と外を「未定」にして、元の絵の色から切り抜きを解く
+    (クローズドフォーム・マッティング、pymatting = MIT)。img: [H, W, 3] 0..1。戻り値: 0..255"""
+    from pymatting import estimate_alpha_cf
+    H, W = b.shape
+    if int(b.sum()) < 64:
+        return (b * 255).astype(np.uint8)
+    ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * CF_BAND + 1, 2 * CF_BAND + 1))
+    tri = np.full((H, W), 0.5)
+    tri[cv2.erode(b, ker) > 0] = 1.0
+    tri[cv2.dilate(b, ker) == 0] = 0.0
+    ys, xs = np.nonzero(b)
+    y0, y1 = max(0, ys.min() - 2 * CF_BAND), min(H, ys.max() + 2 * CF_BAND + 1)
+    x0, x1 = max(0, xs.min() - 2 * CF_BAND), min(W, xs.max() + 2 * CF_BAND + 1)
+    alpha = np.zeros((H, W))
+    try:
+        alpha[y0:y1, x0:x1] = estimate_alpha_cf(img[y0:y1, x0:x1], tri[y0:y1, x0:x1])
+    except Exception as e:  # noqa: BLE001  解けなければ 2 値のまま
+        print(f"cf: {type(e).__name__}: {e}", flush=True)
+        alpha = b.astype(np.float64)
+    return (np.clip(alpha, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
+
+
+def load_depth(depth_dir, i, W, H, cv2, np):
+    """深度の 1 コマ (depth.%05d.png、1 始まり) を [H, W] 0..1 (近い = 1) で読む。無ければ None"""
+    if not depth_dir:
+        return None
+    path = Path(depth_dir) / f"depth.{i:05d}.png"
+    if not path.is_file():
+        return None
+    d = cv2.imdecode(np.fromfile(str(path), dtype=np.uint8), cv2.IMREAD_UNCHANGED)
+    if d is None:
+        return None
+    if d.ndim == 3:
+        d = d[:, :, 0]
+    scale = 65535.0 if d.dtype == np.uint16 else 255.0
+    return cv2.resize(d.astype(np.float32) / scale, (W, H), interpolation=cv2.INTER_LINEAR)
+
+
 def matte_subjects(comfy_root, images, masks, k, result, report):
     """SAM2Matting (SAM3 版) で、キャラごとに k コマ目のマスクから動画全体を切り抜く。result[i, :, :, s] に 0..255 で書く。
     report(s, done, total): 進み具合。使えなければ False を返す"""
@@ -170,8 +271,10 @@ def main():
     ap.add_argument("--comfyui", default=r"C:\ComfyUI_windows_portable\ComfyUI")
     ap.add_argument("--ckpt", default="")
     ap.add_argument("--status", default="")
-    ap.add_argument("--matte", default="sam2matting", choices=["sam2matting", "none"],
-                    help="sam2matting: SAM2Matting で切り抜く (CC BY-NC 4.0)。none: SAM 3.1 の追跡だけ")
+    ap.add_argument("--matte", default="depthcf", choices=["depthcf", "cf", "sam2matting", "none"],
+                    help="depthcf: マスクと深度を混ぜて直し、縁をクローズドフォームで切り抜く (既定)。cf: 縁だけクローズドフォーム。"
+                         "sam2matting: SAM2Matting で切り抜く (CC BY-NC 4.0、営利不可)。none: ガイデッドフィルタ")
+    ap.add_argument("--depth-dir", default="", help="depthcf の深度 (depth.%%05d.png)。空なら --out-dir の隣の depth")
     a = ap.parse_args()
 
     out = Path(a.out_dir)
@@ -332,12 +435,27 @@ def main():
                 track(list(range(k, -1, -1)))
 
         # --- 3. 仕上げ: 穴を埋め、切れ端を消し、縁を整える (コマごと、キャラごと) ---
+        depth_dir = a.depth_dir or str(out.parent / "depth")
+        depth_used = [0]
         write_json(status, {"state": "running", "pid": os.getpid(), "stage": "clean", "progress": 0.95})
         for i in range(N):
             if matted:
                 for s_ in range(S):
                     result[i, :, :, s_] = clean_matte(result[i, :, :, s_], cv2, np)
                 # キャラどうしが重なった所は、合わせて 1 を超えないようにする
+                tot = result[i].astype(np.float32).sum(axis=2, keepdims=True)
+                if float(tot.max()) > 255.0:
+                    result[i] = np.where(tot > 255.0, result[i] * (255.0 / np.maximum(tot, 1.0)) + 0.5, result[i]).astype(np.uint8)
+            elif a.matte in ("depthcf", "cf"):
+                img = images[i].numpy().astype(np.float64)
+                depth = load_depth(depth_dir, i + 1, W, H, cv2, np) if a.matte == "depthcf" else None
+                if depth is not None:
+                    depth_used[0] += 1
+                for s_ in range(S):
+                    b = clean_binary(result[i, :, :, s_], cv2, np)
+                    if depth is not None:
+                        b = depth_fix(b, depth, cv2, np)
+                    result[i, :, :, s_] = cf_matte(b, img, cv2, np)
                 tot = result[i].astype(np.float32).sum(axis=2, keepdims=True)
                 if float(tot.max()) > 255.0:
                     result[i] = np.where(tot > 255.0, result[i] * (255.0 / np.maximum(tot, 1.0)) + 0.5, result[i]).astype(np.uint8)
@@ -351,7 +469,8 @@ def main():
         for i in range(N):
             cv2.imwrite(str(out / f"subject.{i + 1:05d}.png"), result[i][:, :, ::-1])
         write_json(out / "manifest.json", {
-            "generator": "subject_mask.py", "model": "sam3.1_multiplex" + (" + sam2matting_sam3" if matted else ""), "text": a.text,
+            "generator": "subject_mask.py", "model": "sam3.1_multiplex" + (" + sam2matting_sam3" if matted else ""), "matte": a.matte,
+            "depth_frames_used": depth_used[0], "text": a.text,
             "point": [px, py], "frame": k, "start": how, "subjects": S, "channels": "R,G,B = subject 1,2,3",
             "frames": N, "size": [W, H], "fps": fps,
             "file": "subject.%05d.png", "seconds": round(time.time() - t0, 1)}, must=True)
