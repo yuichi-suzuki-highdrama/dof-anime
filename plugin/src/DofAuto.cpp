@@ -59,6 +59,9 @@ struct AutoConfig {
 	/* remote (Depth Engine = Remote): 別の PC の深度サーバー (tools/depth_server)。gen_passes.py --remote で動画を送って深度を受け取る */
 	/* 送り先は設定ファイル (%APPDATA%\SRLM\RelightAnime.ini、DoFAnime.ini) の remote_server。空ならこの PC で作る */
 	std::wstring remoteServer;
+	/* この PC で作る深度の、モデルに入れる短辺 (設定ファイルの depth_input_size)。既定 518 (VRAM の山 約 11GB)。
+	   770 にすると髪の毛などが細かく出る (Small のままなので商用可。時間は約 2 倍、VRAM の山 約 21GB) */
+	int depthInputSize = 518;
 	/* キャラのマスク (Subject Layer) の自動生成: SAM 3.1 を ComfyUI の Python で動かす (tools/subject_mask.py) */
 	std::wstring subjectPython = L"C:\\ComfyUI_windows_portable\\python_embeded\\python.exe";
 	std::wstring subjectScript = L"C:\\dev\\DepthOfFieldAEPlugin\\tools\\subject_mask.py";
@@ -109,6 +112,7 @@ static void LoadIni(const std::wstring &ini)
 		else if (k == L"cache") g_cfg.cache = v;
 		else if (k == L"server") g_cfg.server = v;
 		else if (k == L"remote_server") g_cfg.remoteServer = v;
+		else if (k == L"depth_input_size") { const int n = _wtoi(v.c_str()); if (n >= 252 && n <= 1400) g_cfg.depthInputSize = n; }
 		else if (k == L"extra") g_cfg.extra = v;
 		else if (k == L"engine") g_cfg.engine = v;
 		else if (k == L"depth_exe") g_cfg.depthExe = v;
@@ -505,6 +509,8 @@ static std::wstring NativeCommand(const AutoJob &job)
 		+ L" --head \"" + g_cfg.head + L"\""
 		+ L" --ort \"" + ort + L"\""
 		+ L" --provider " + job.provider;
+	/* 大きく作るときは、エンコーダに一度に通すフレームを減らして VRAM の山を抑える */
+	if (g_cfg.depthInputSize != 518) cmd += L" --input-size " + std::to_wstring(g_cfg.depthInputSize) + (g_cfg.depthInputSize > 518 ? L" --chunk 2" : L"");
 	if (!dml) {
 		size_t pos = 0;
 		while (pos <= g_cfg.dllDirs.size()) {
