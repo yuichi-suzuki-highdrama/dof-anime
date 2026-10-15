@@ -472,7 +472,7 @@ static PF_Err ParamsSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef 
 	   人物の縁は深度だけで決まる (マスクの縁のガタガタや、髪の間の埋まりが出ない) */
 	AEFX_CLR_STRUCT(def);
 	PF_ADD_FLOAT_SLIDERX("Subject Inset", 0.f, 80.f, 0.f, 40.f, DEF_SUBJECT_INSET,
-		PF_Precision_TENTHS, PF_ValueDisplayFlag_PIXEL, 0, ID_SUBJECT_INSET);
+		PF_Precision_TENTHS, PF_ValueDisplayFlag_NONE, 0, ID_SUBJECT_INSET);
 
 	/* ピントに関係なく、マスクの中を必ずくっきり残す (手前のぼけも重ねない) */
 	AEFX_CLR_STRUCT(def);
@@ -513,7 +513,7 @@ static PF_Err ParamsSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef 
 	/* ぼけの大きさ: ピントから深度が 0.5 離れた所のぼけの半径 (1080p でのピクセル数) */
 	AEFX_CLR_STRUCT(def);
 	PF_ADD_FLOAT_SLIDERX("Blur Size", 0.f, 160.f, 0.f, 80.f, DEF_BLUR_SIZE,
-		PF_Precision_TENTHS, PF_ValueDisplayFlag_PIXEL, 0, ID_BLUR_SIZE);
+		PF_Precision_TENTHS, PF_ValueDisplayFlag_NONE, 0, ID_BLUR_SIZE);
 
 	/* 手前のぼけの倍率。既定は 0 (ピントより手前はぼかさず、奥だけぼかす)。手前の物が大きくぼけて広がる所は、
 	   裏の背景が元の絵に無く境目も崩れやすいので、手前ボケが欲しいカットだけ上げる */
@@ -528,17 +528,17 @@ static PF_Err ParamsSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef 
 	/* 手前の物の輪郭を広げる幅。推定した深度の境目は輪郭線より内側にあることが多いので、輪郭線を手前の物に入れる */
 	AEFX_CLR_STRUCT(def);
 	PF_ADD_FLOAT_SLIDERX("Edge Expand", 0.f, 12.f, 0.f, 6.f, DEF_EDGE_EXPAND,
-		PF_Precision_TENTHS, PF_ValueDisplayFlag_PIXEL, 0, ID_EDGE_EXPAND);
+		PF_Precision_TENTHS, PF_ValueDisplayFlag_NONE, 0, ID_EDGE_EXPAND);
 
 	/* 深度の地図の境目は絵の輪郭線から 1〜3 画素ずれ、ずれた分の背景がくっきりした細い帯になる。
 	   Edge Bias: ぼけている側をくっきりした側へその幅だけ食い込ませる (帯が消える。輪郭線のいちばん外も少しぼける)。
 	   Edge Soften: くっきりした物の縁から内側へ、その幅でぼけを少しずつ弱める (縁がふわっとつながる) */
 	AEFX_CLR_STRUCT(def);
 	PF_ADD_FLOAT_SLIDERX("Edge Bias", 0.f, 8.f, 0.f, 4.f, DEF_EDGE_BIAS,
-		PF_Precision_TENTHS, PF_ValueDisplayFlag_PIXEL, 0, ID_EDGE_BIAS);
+		PF_Precision_TENTHS, PF_ValueDisplayFlag_NONE, 0, ID_EDGE_BIAS);
 	AEFX_CLR_STRUCT(def);
 	PF_ADD_FLOAT_SLIDERX("Edge Soften", 0.f, 16.f, 0.f, 8.f, DEF_EDGE_SOFTEN,
-		PF_Precision_TENTHS, PF_ValueDisplayFlag_PIXEL, 0, ID_EDGE_SOFTEN);
+		PF_Precision_TENTHS, PF_ValueDisplayFlag_NONE, 0, ID_EDGE_SOFTEN);
 
 	AEFX_CLR_STRUCT(def);
 	PF_END_TOPIC(ID_TOPIC_BLUR_END);
