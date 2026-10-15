@@ -10,7 +10,7 @@
  */
 (function () {
     var LOG = Folder.temp.fsName + "/dof_ae_test/explainer_renders.log";
-    var OUT = $.getenv("DOF_EXPLAINER_OUT") || (Folder.temp.fsName.replace(/\/g, "/") + "/dof_explainer/renders/");
+    var OUT = $.getenv("DOF_EXPLAINER_OUT") || (Folder.temp.fsName.replace(/\\/g, "/") + "/dof_explainer/renders/");
     var lines = [];
     function log(s) { lines.push(s); }
     app.beginSuppressDialogs();
