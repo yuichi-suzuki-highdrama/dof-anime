@@ -36,7 +36,7 @@ Footage that already has depth from Relight Anime is ready at once, and a Religh
   See Relight Anime's [how it works](https://github.com/yuichi-suzuki-highdrama/relight-anime/blob/main/docs/how-it-works.en.md) for inference, normalisation and temporal smoothing.
 - **Detail** (`depth_input_size`): the short side fed to the model. At the default 518, thin strands of hair were missing from depth and stayed as sharp lines after blurring.
   At 770 they are captured to the tips (still the Small model, so commercial use is fine).
-  For 1376×768 × 192 frames: 518 takes about 19 s with a VRAM peak of about 11 GB; 770 about 32 s and 21 GB. 1036 exceeds 32 GB of VRAM.
+  For 1376×768 × 192 frames: 518 takes about 19 s with a VRAM peak of about 11 GB; 770 about 32 s and 21 GB (fp32). With fp16 models (fp16 inside, fp32 inputs and outputs; mean difference 0.0002), 770 needs about 12 GB and 1036 about 55 s and 20 GB. At 1036, grass blades that were cut off at 770 are captured to the tips. Large inputs pass the encoder one frame at a time (two at a time peaked at about 25 GB).
 - **The Large model** gives finer hair and backgrounds but is **CC-BY-NC-4.0 (non-commercial)**. It is used only by Depth Engine = Remote Quality.
 
 ## 3. Blurring
@@ -167,7 +167,7 @@ Same depth, same focus pull, same blur strength and aperture (nonagon, 70% round
 Requirements: Windows 11, After Effects 2024 or later (tested on AE 2026), Visual Studio 2022 Build Tools (C++), CMake, Ninja, CUDA Toolkit 12.8 or later, the After Effects SDK.
 
 1. **Depth**: prepare the ONNX models and `relight_depth.exe` as described in Relight Anime (their locations are written to `%APPDATA%\SRLM\RelightAnime.ini`).
-   For finer depth add `depth_input_size=770` to that file (24 GB VRAM or more)
+   For finer depth, build the fp16 models (`python tools/export_vda_onnx.py --split --fp16`), point `encoder` and `head` at them, and add `depth_input_size=1036` to that file (24 GB VRAM or more)
 2. Get the **AE SDK** from https://developer.adobe.com/after-effects/ (not included)
 3. Build and install the **plugin** (administrator; close AE first):
    `.\plugin\build.ps1 -SdkRoot <SDK path> -Install`

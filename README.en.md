@@ -78,7 +78,7 @@ See [docs/how-it-works.en.md](docs/how-it-works.en.md) for edge handling, charac
 - Where the estimated depth edge does not match the drawn outline, the blur edge is off too. Too much Edge Expand leaves a sharp sliver of background just outside the outline.
 - Heavily blurred foreground cannot reveal background that the image never contained; it is filled from nearby colours.
 - Depth varies within a character, so a narrow Focus Range can blur part of a face (a character matte with Subject Flatten evens this out).
-- Thin hair tips can be missing from depth and stay sharp. Setting `depth_input_size=770` in the settings file captures them (about 21 GB of VRAM).
+- Thin hair tips and grass blades can be missing from depth and stay sharp or blur halfway. Setting `depth_input_size=1036` with the fp16 models captures them (about 20 GB of VRAM; see the Relight Anime README).
 
 ## Licence
 

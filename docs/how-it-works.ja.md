@@ -36,7 +36,7 @@ Relight Anime で深度を作った素材なら、作り直さずにすぐ使え
   推定・正規化・時間方向のならしの詳細は Relight Anime の [作り方](https://github.com/yuichi-suzuki-highdrama/relight-anime/blob/main/docs/how-it-works.ja.md) を見てください。
 - **細かさ**（`depth_input_size`）: モデルに入れる短辺の大きさです。既定の 518 では、細い髪の束が深度に入らず、ぼかしても線のまま残ることがありました。
   770 にすると毛先まで入ります（Small のままなので商用可）。
-  1376×768・192 コマで、518 は約 19 秒・VRAM の山 約 11GB、770 は約 32 秒・約 21GB でした。1036 は VRAM 32GB を超えて使えません。
+  1376×768・192 コマで、518 は約 19 秒・VRAM の山 約 11GB、770 は約 32 秒・約 21GB でした（fp32）。モデルを fp16 にすると（中だけ fp16、入口と出口は fp32。値の差は平均 0.0002）、770 は約 12GB、1036 は約 55 秒・約 20GB で動きます。1036 では、770 で途切れていた草の葉の先まで入りました。大きい入力ではエンコーダに 1 コマずつ通します（2 コマずつだと約 25GB）。
 - **大きいモデル（Large）** は髪も背景も細かく出ますが、**CC-BY-NC-4.0（非商用）** です。Depth Engine = Remote Quality のときだけ使います。
 
 ## 3. ぼかしの計算
@@ -167,7 +167,7 @@ After Effects の Camera Lens Blur にある項目を、集めるときの重み
 必要なもの: Windows 11、After Effects 2024 以降（AE 2026 で確認）、Visual Studio 2022 Build Tools（C++）、CMake、Ninja、CUDA Toolkit 12.8 以降、After Effects SDK。
 
 1. **深度の準備**: Relight Anime の手順どおりに、ONNX モデルと `relight_depth.exe` を用意する（`%APPDATA%\SRLM\RelightAnime.ini` に場所が書かれる）。
-   細かく作るなら同じファイルに `depth_input_size=770` を足す（VRAM 24GB 以上）
+   細かく作るなら、fp16 のモデルを作って（`python tools/export_vda_onnx.py --split --fp16`）`encoder` と `head` に指定し、同じファイルに `depth_input_size=1036` を足す（VRAM 24GB 以上）
 2. **AE SDK** を https://developer.adobe.com/after-effects/ から入手して展開する（リポジトリには含めていない）
 3. **プラグイン**をビルドして入れる（管理者権限。AE を閉じてから）:
    `.\plugin\build.ps1 -SdkRoot <SDK の場所> -Install`
