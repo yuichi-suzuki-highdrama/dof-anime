@@ -159,6 +159,7 @@ static float RenderFrameCPU(DofContext &c, const DfImage &src, const DfAuxMap &d
 	c.lutDec = HostLut();
 	c.lutEnc = c.lutDec + DF_LUT_SIZE;
 	c.depth = c.coc = c.tileR = c.subject = c.subjectTgt = NULL;
+	c.excludeDepth = -1.f;
 	dfSetupFrame(c, c.p.focusDepth);
 	for (int s = 0; s < DF_MAX_SUBJECTS; ++s) c.subjectDepth[s] = -1.f;
 
@@ -202,6 +203,12 @@ static float RenderFrameCPU(DofContext &c, const DfImage &src, const DfAuxMap &d
 			dfSetupFrame(c, focus);
 			for (int s = 0; s < DF_MAX_SUBJECTS; ++s) c.subjectDepth[s] = sd[s];
 		}
+		/* Exclude Layer の物の代表の深度 (手前寄り) */
+		if (fixMaps && fixMaps[2].img.data) {
+			std::vector<float> lowEx((size_t)dw * dh * 3);
+			parallelRows(dh, [&](A_long j) { for (int i = 0; i < dw; ++i) dfSubjectAtLow3(depthMap, fixMaps[2], 1, i, (int)j, &lowEx[((size_t)j * dw + i) * 3]); });
+			c.excludeDepth = dfExcludeDepth(low.data(), lowEx.data(), (size_t)dw * dh);
+		}
 
 		depth.resize(NP); tmp.resize(NP); coc.resize(NP);
 		parallelRows(H, [&](A_long y) {
@@ -244,6 +251,15 @@ static float RenderFrameCPU(DofContext &c, const DfImage &src, const DfAuxMap &d
 				for (int x = 0; x < W; ++x) {
 					const size_t n = (size_t)y * W + x;
 					depth[n] = dfSubjectBlendDepth(&c, depth[n], c.subject[n], c.subjectTgt[n]);
+				}
+			});
+		}
+		if (fixMaps && fixMaps[2].img.data && c.excludeDepth >= 0.f) {
+			const DfAuxMap &ex = fixMaps[2];
+			parallelRows(H, [&](A_long y) {
+				for (int x = 0; x < W; ++x) {
+					const size_t n = (size_t)y * W + x;
+					depth[n] = dfExcludeBlendDepth(&c, depth[n], dfFixAt(ex, (float)x * ex.sx + ex.ox, (float)y * ex.sy + ex.oy));
 				}
 			});
 		}
@@ -514,7 +530,8 @@ static PF_Err ParamsSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef 
 	PF_ADD_BUTTON("Blur by Text", "Text...", 0, PF_ParamFlag_SUPERVISE, ID_BLUR_PROMPT);
 
 	/* Exclude Layer: アルファの所をキャラのマスクから抜く。草など、キャラの手前にある物がマスクに入ると、
-	   その所だけキャラの深度にそろえられて途中で切れる。抜いた所は元の深度のままぼける */
+	   その所だけキャラの深度にそろえられて途中で切れる。抜いた物は、その物の中の手前寄りの深度にそろえる
+	   (細い葉の深度は背景と混ざって真ん中だけくっきり残るので、根元から先まで同じ前ぼけにする) */
 	AEFX_CLR_STRUCT(def);
 	PF_ADD_LAYER("Exclude Layer", PF_LayerDefault_NONE, ID_EXCLUDE_LAYER);
 	AEFX_CLR_STRUCT(def);

@@ -133,6 +133,14 @@ __global__ void kSubject(DofContext c, DfAuxMap map, DfAuxMap ex, float *subject
 	tgtOut[n] = tgt;
 }
 
+/* Exclude Layer の物を、その物の代表の深度へ寄せる */
+__global__ void kExcludeBlend(DofContext c, DfAuxMap ex, float *depth)
+{
+	DF_XY(c.outW, c.outH);
+	const size_t n = (size_t)y * c.outW + x;
+	depth[n] = dfExcludeBlendDepth(&c, depth[n], dfFixAt(ex, (float)x * ex.sx + ex.ox, (float)y * ex.sy + ex.oy));
+}
+
 /* Subject Inset: 縮める (横 → 縦) */
 __global__ void kErode(const float *in, float *out, int W, int H, int rad, bool horizontal)
 {
@@ -315,6 +323,7 @@ int DofGPU_Render(DfGpuFrame &f, char *err, int errLen)
 	if (!c.lutDec) { if (err) snprintf(err, errLen, "LUT alloc failed"); return -1; }
 	c.lutEnc = c.lutDec + DF_LUT_SIZE;
 	c.depth = c.coc = c.tileR = c.subject = c.subjectTgt = NULL;
+	c.excludeDepth = -1.f;
 	dfSetupFrame(c, c.p.focusDepth);
 	const bool hasSubject = f.subjectMap.img.data != NULL && (c.p.subjectAmount > 0.f || c.p.subjectFlatten > 0.f);
 	for (int s = 0; s < DF_MAX_SUBJECTS; ++s) c.subjectDepth[s] = -1.f;
@@ -330,6 +339,7 @@ int DofGPU_Render(DfGpuFrame &f, char *err, int errLen)
 		count((size_t)dw * dh); count(NP); count(NP); count(NP);
 		if (f.sharpMap.img.data || f.blurMap.img.data) { count(NP); count(NP); }
 		if (hasSubject) { count(NP); count(NP); count(NP); count(NP); count((size_t)dw * dh * 3); if (c.inset >= 0.5f) count(NP); }
+		if (f.excludeMap.img.data) count((size_t)dw * dh * 3);
 		count((size_t)c.tilesX * c.tilesY); count((size_t)c.tilesX * c.tilesY);
 		if (c.p.edgeBias > 0.f || c.p.edgeSoften > 0.f || c.p.nearFill > 0.f) count(NP);
 	}
@@ -356,7 +366,8 @@ int DofGPU_Render(DfGpuFrame &f, char *err, int errLen)
 		kLowDepth<<<Grid2(dw, dh), BLOCK2>>>(f.depthMap.img, nb, c.p.depthNear, c.p.passEncoding == 2, low);
 		DF_CHECK("depth");
 		float focus = c.p.focusDepth;
-		if (c.p.focusMode == FOCUS_POINT || hasSubject) {
+		float exD = -1.f;
+		if (c.p.focusMode == FOCUS_POINT || hasSubject || f.excludeMap.img.data) {
 			/* ピントの深度と人物の代表の深度は、深度の点 (小さい) をホストへ写して求める */
 			std::vector<float> host((size_t)dw * dh);
 			cudaMemcpy(host.data(), low, sizeof(float) * host.size(), cudaMemcpyDeviceToHost);
@@ -369,6 +380,14 @@ int DofGPU_Render(DfGpuFrame &f, char *err, int errLen)
 				cudaMemcpy(hmask.data(), lowMask, sizeof(float) * hmask.size(), cudaMemcpyDeviceToHost);
 			}
 			focus = dfResolveFocus(c, host.data(), hasSubject ? hmask.data() : NULL, dw, dh, f.depthMap.sx, f.depthMap.sy);
+			if (f.excludeMap.img.data) {
+				float *lowEx = cv.take((size_t)dw * dh * 3);
+				kSubjectLow<<<Grid2(dw, dh), BLOCK2>>>(f.depthMap, f.excludeMap, 1, dw, dh, lowEx);
+				DF_CHECK("exclude low");
+				std::vector<float> hex((size_t)dw * dh * 3);
+				cudaMemcpy(hex.data(), lowEx, sizeof(float) * hex.size(), cudaMemcpyDeviceToHost);
+				exD = dfExcludeDepth(host.data(), hex.data(), (size_t)dw * dh);
+			}
 		}
 		{
 			float sd[DF_MAX_SUBJECTS];
@@ -376,6 +395,7 @@ int DofGPU_Render(DfGpuFrame &f, char *err, int errLen)
 			dfSetupFrame(c, focus);
 			for (int s = 0; s < DF_MAX_SUBJECTS; ++s) c.subjectDepth[s] = sd[s];
 		}
+		c.excludeDepth = exD;
 		f.focusUsed = focus;
 
 		float *depth = cv.take(NP), *tmp = cv.take(NP), *coc = cv.take(NP);
@@ -403,6 +423,10 @@ int DofGPU_Render(DfGpuFrame &f, char *err, int errLen)
 			c.subject = subject;
 			c.subjectTgt = tgt;
 			kBlend<<<Grid2(W, H), BLOCK2>>>(c, depth);
+		}
+		if (f.excludeMap.img.data && c.excludeDepth >= 0.f) {
+			kExcludeBlend<<<Grid2(W, H), BLOCK2>>>(c, f.excludeMap, depth);
+			DF_CHECK("exclude");
 		}
 		/* 手直しのレイヤー。Blur Layer の所は画面のいちばん奥と同じだけぼかす */
 		float *sharpB = NULL;

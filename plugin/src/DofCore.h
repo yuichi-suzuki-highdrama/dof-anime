@@ -304,6 +304,7 @@ struct DofContext {
 	const float *subject;     /* キャラのマスク (全員を合わせたもの、0..1、出力の大きさ。NULL なら無し) */
 	const float *subjectTgt;  /* その画素のキャラの代表の深度 (Subject Flatten で寄せる先。キャラでなければ負) */
 	float subjectDepth[DF_MAX_SUBJECTS];   /* キャラごとの代表の深度 (マスクの中の深度の中央値)。いなければ負 */
+	float excludeDepth;       /* Exclude Layer の物の代表の深度 (手前寄り)。無ければ負 */
 	/* リニアの色 (premultiplied、RGBA の順に 4 個ずつ)。lin[0] が出力の大きさ、lin[k] は 1/2^k */
 	const float *lin[DF_LEVELS];
 	int   lw[DF_LEVELS], lh[DF_LEVELS];
@@ -626,6 +627,41 @@ DF_HD DF_INL float dfErode1D(const float *in, int W, int H, int rad, bool horizo
 		m = dfMin(m, in[(size_t)yy * W + xx]);
 	}
 	return m;
+}
+
+/*
+ * Exclude Layer の物 (草など) は、キャラのマスクから抜くうえに、その物自身の深度にそろえる。
+ * 細い葉の深度は後ろの背景と混ざり、根元は手前・先は奥・真ん中はちょうどキャラと同じ距離になって、真ん中だけくっきり残った。
+ * 物の中の深度の手前寄りの値 (DF_EXCLUDE_PERCENTILE) にそろえると、葉は根元から先まで同じ前ぼけになる
+ */
+static constexpr float DF_EXCLUDE_PERCENTILE = 0.8f;   /* 物の中の深度の、この割合の点 (近い = 1 なので、大きいほど手前寄り) */
+
+/* 深度の点 low (n 個) のうち、物のマスク ex (3 チャンネル並び、[0] がアルファ) が 0.5 を超える所の手前寄りの値。少なければ負 */
+inline float dfExcludeDepth(const float *low, const float *ex3, size_t n)
+{
+	static const int BINS = 1024;
+	int hist[BINS] = {0};
+	int cnt = 0;
+	for (size_t i = 0; i < n; ++i) {
+		if (ex3[i * 3] <= 0.5f) continue;
+		hist[dfClamp((int)(dfSat(low[i]) * (BINS - 1) + 0.5f), 0, BINS - 1)]++;
+		++cnt;
+	}
+	if (cnt < 16) return -1.f;
+	const int target = (int)(DF_EXCLUDE_PERCENTILE * (float)cnt);
+	int acc = 0;
+	for (int k = 0; k < BINS; ++k) {
+		acc += hist[k];
+		if (acc > target) return (float)k / (float)(BINS - 1);
+	}
+	return 1.f;
+}
+
+/* 物のマスクの値 a の分だけ、深度をその物の代表の深度へ寄せる */
+DF_HD DF_INL float dfExcludeBlendDepth(const DofContext *c, float depth, float a)
+{
+	if (c->excludeDepth < 0.f || a <= 0.f) return depth;
+	return dfMix(depth, c->excludeDepth, dfSat(a));
 }
 
 /* ピントの深度からの差 → 符号付きのぼけの半径 (出力の画素。手前 = 負) */
