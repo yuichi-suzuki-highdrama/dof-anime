@@ -143,6 +143,30 @@ def pair(n, inputs, ss, dur, crop, labels, cap_name, main, sub, bad=""):
     run(ins + ["-filter_complex", ";".join(fl), "-map", "[out]", "-map", "[a]", "-t", f"{dur}"] + ENC + [str(SEG / f"{n:02d}.mp4")])
 
 
+def spots(n, src, items, dur, cap_name, main, sub, bad):
+    """1 本の素材の、別々の時刻・場所を切り出して左右に並べる (高さをそろえる)。items: [(開始の秒, (x, y, w, h), ラベル)]"""
+    avail_h = H - 190 - 60 - BADGE_H
+    gap = 20
+    th = avail_h
+    widths = [int(c[2] * th / c[3]) for _, c, _ in items]
+    if sum(widths) + gap > W - 60:
+        k = (W - 60 - gap) / sum(widths)
+        th = int(th * k)
+    th = th // 2 * 2
+    ins, fl = [], []
+    for i, (ss, (x, y, cw, ch), lab) in enumerate(items):
+        ins += ["-i", str(src)]
+        tw = int(cw * th / ch) // 2 * 2
+        fl.append(f"[{i}:v]trim=start={ss}:duration={dur},setpts=PTS-STARTPTS,scale=1376:768,crop={cw}:{ch}:{x}:{y},"
+                  f"scale={tw}:{th}:flags=lanczos,fps={FPS},{label(f'{cap_name}_l{i}', lab, x=14, y=14, size=34)}[v{i}]")
+    fl.append(f"[v0]pad=iw+{gap}:ih:0:0:color={BG}[v0p]")
+    fl.append("[v0p][v1]hstack=inputs=2[hs]")
+    top = BADGE_H + (H - 190 - BADGE_H - th) // 2
+    fl.append(f"[hs]pad={W}:{H}:(ow-iw)/2:{top}:color={BG},{caption(cap_name, main, sub)},{badge(cap_name + '_bd', bad)},{fades(dur)}[out]")
+    fl.append(f"anullsrc=r=48000:cl=stereo,atrim=0:{dur}[a]")
+    run(ins + ["-filter_complex", ";".join(fl), "-map", "[out]", "-map", "[a]", "-t", f"{dur}"] + ENC + [str(SEG / f"{n:02d}.mp4")])
+
+
 def seq_input(folder, name="depth.%05d.png"):
     return ["-framerate", "24", "-i", str(Path(folder) / name)]
 
@@ -196,35 +220,27 @@ def main():
     for old in SEG.glob("*.mp4"):
         old.unlink()
 
-    # 1. 元の動画 (タイトルが左下からすべり込む)
+    # 1. 完成版を最初に流す (つかみ。タイトルが左下からすべり込む)
     title = (f"drawtext=fontfile='{FONT_B}':textfile='{text_file('title', 'DoF Anime')}':fontsize=96:fontcolor=white:"
              f"box=1:boxcolor=black@0.5:boxborderw=22:y=h-300:x='{slide(0.5, 3.6)}'")
     tsub = (f"drawtext=fontfile='{FONT_R}':textfile='{text_file('title_sub', 'AI アニメ動画に、あとからピントとぼけを足す After Effects プラグイン')}':"
             f"fontsize=42:fontcolor=white:box=1:boxcolor=black@0.5:boxborderw=16:y=h-160:x='{slide(0.7, 3.4)}'")
-    full(0, a.src, 0, 5.0, "元の動画", "plain", "", "", extra=f"{title},{tsub}")
-    # 2. ぼけあり
-    full(1, R / "EX_dof_only.mp4", 0.5, 6.0, "DoF Anime", "dof",
+    full(0, a.final, 0, 8.0, "完成版：Relight Anime ＋ DoF Anime ＋ FilmConvert Nitrate", "final", "", "", extra=f"{title},{tsub}")
+    # 2. 元の動画
+    full(1, a.src, 0, 4.0, "元の動画", "plain", "", "")
+    # 3. ぼけあり
+    full(2, R / "EX_dof_only.mp4", 0.5, 6.0, "DoF Anime", "dof",
          "手前の女性から奥の女性へ、ピントを送る", "Focus Point のキーフレーム 2 つだけ。0.8 秒かけてなめらかに移る")
-    # 3. 作り方
-    full(2, R / "EX_depth.mp4", 0, 3.5, "Output：Depth", "depth",
+    # 4. 作り方
+    full(3, R / "EX_depth.mp4", 0, 3.5, "Output：Depth", "depth",
          "① 動画から奥行き（深度）を推定", "Video Depth Anything（Small・商用可）。白いほど手前", with_audio=False)
-    full(3, R / "EX_blurmap.mp4", 1.5, 3.5, "Output：Blur Map", "blurmap",
+    full(4, R / "EX_blurmap.mp4", 1.5, 3.5, "Output：Blur Map", "blurmap",
          "② 深度の差から、ぼけの大きさを決める", "手前＝青、奥＝橙、ピント＝黒。手前と奥を分けるので背景がにじまない", with_audio=False)
-    mask_overlay(4, 2.0, 3.5)
-    # 4. 足りていないところ (草や髪の毛の抜けが甘い所。拡大して見せ、何が足りないか・どこまで直せるかを正直に書く)
-    depth_pair(5, 1.0, 4.0, (40, 150, 440, 560), "足りていないところ ①",
-               "細い髪や草の葉は、深度に入りにくい",
-               "推定を細かく（518 → 1036）して改善したが、細い所は今も背景と混ざることがある")
-    pair(6, [(R / "EX_no_exclude.mp4", ""), (R / "EX_dof_only.mp4", "")], 0.8, 3.0, (0, 398, 405, 279),
-         ["そのまま", "Exclude（grass）を指定"], "grass",
-         "人物のマスクに草が入ると、葉が途中で切れる",
-         "自動では直らない。Exclude で草を指定すると、根元から先まで同じ前ぼけになる", bad="足りていないところ ②")
-    pair(7, [(R / "EX_nearfill0.mp4", ""), (R / "EX_dof_only.mp4", "")], 5.5, 3.0, (0, 170, 320, 360),
-         ["Near Fill 0（既定）", "Near Fill 16"], "nearfill",
-         "ぼけた髪の束の縁が、線のまま残る",
-         "Near Fill を上げると目立たなくなる（既定は 0 なので、設定が要る）", bad="足りていないところ ③")
-    # 5. 完成版
-    full(8, a.final, 0, 8.0, "完成版：Relight Anime ＋ DoF Anime ＋ FilmConvert Nitrate", "final", "", "")
+    mask_overlay(5, 2.0, 3.5)
+    # 5. 今後の課題: いろいろ処置をしても抜けの甘い所が残る (完成版の中の 2 か所を拡大して並べる)
+    spots(6, a.final, [(5.5, (0, 170, 320, 360), "髪の毛先"), (0.8, (200, 420, 300, 300), "草の葉の先")], 3.2, "limits",
+          "いろいろ処置をしても、抜けの甘い所が残る",
+          "完成版でも、ぼけた髪の毛先や草の葉の先が、細い線のように残る", "今後の課題")
 
     segs = sorted(SEG.glob("*.mp4"))
     lst = SEG / "list.txt"
