@@ -71,6 +71,7 @@ Estimated depth is coarse; blur edges land 1–3 px off the line art and show up
 | Step tightening | Where the depth range within 8 px (1080p) is large, each pixel snaps to the nearer end (near or far). No in-between depth remains on a step, so no in-focus line appears along edges |
 | Edge Bias | Pushes the blurrier side into the sharper side by the given width (uses a clearly larger blur from the neighbourhood). The strip ends up inside the blur |
 | Edge Soften | Smooths far blur with a separable Gaussian and lets it fade into the edge of sharp objects, so edges join softly |
+| Near Fill | Spreads foreground blur into its surroundings: the nearest blur in a square window (two separable passes) is used only when it is clearly larger than the pixel's own blur (large far blur is never overwritten). When blurred hair strands are in front, the in-focus gaps between them blur too, so strand edges do not show as lines |
 
 ## 5. Character mattes
 
@@ -96,12 +97,14 @@ SAM 3.1 is used as a library from a ComfyUI install (ComfyUI's implementation an
 | Subject Inset | Shrinks the matte inward (default 12 px) and feathers it. The matte then only evens out the inside; the character's edge is decided by depth alone, so jagged matte edges and filled gaps between hair strands do not show |
 | Focus with Inset | The band outside the shrunken matte keeps its original depth, so focus is taken from the original depth around the point, and the character under the point is flattened to that same depth (with the median, the band and the inside disagreed) |
 | Steps with Inset | Step tightening ignores the matte (treating the shrunken edge as a character boundary drew a line inside the character) |
+| Exclude Layer | Things in front of the character (grass) that end up in the matte were flattened to the character's depth, so blades broke where the matte ended. The Exclude Layer alpha is subtracted from the matte. Thin blades also mix with the background in depth (near at the root, far at the tip, exactly in focus in the middle, leaving a sharp band), so the excluded area is pulled to the 80th percentile (near side) of its own depth every frame; blades blur evenly from root to tip |
 | Smooth matte | The matte is read as a 3×3 grid of samples (3 px apart at 1080p) weighted 1-2-1, which removes jaggies where two characters meet |
 | Keep Subject Sharp | Reduces blur inside the matte regardless of focus (default 0%). It applies to every character in the matte, so out-of-focus characters become sharp too |
 
 ### 5.3 Manual fixes
 
 - **Sharp Layer / Blur Layer**: draw a mask on a solid. Sharp Layer sets blur to 0; Blur Layer replaces depth with the farthest background (5th percentile).
+- **Exclude by Text**: builds a matte from object names (e.g. grass) and wires it to Exclude Layer (same pipeline as Sharp by Text).
 - **Sharp by Text / Blur by Text**: type object names (e.g. flower, grass); `tools/prompt_mask.py` finds and tracks them with SAM 3.1 and wires an alpha matte.
 
 ## 6. Lens character
@@ -193,4 +196,5 @@ To change settings for DoF Anime only, write the same key=value lines to `%APPDA
 - Heavily blurred foreground objects reveal background that is not in the source image; it is filled from surrounding colours
 - Thin wind-blown hair tips can be missing from depth and stay as sharp lines (raise `depth_input_size`, or name the hair in Blur by Text)
 - Automatic mattes can fill thin gaps between hair strands (with Subject Inset the edge comes from depth, so this barely shows)
+- Automatic mattes can include grass in front of the character (remove it with Exclude by Text). Objects estimated at the character's distance (flowers beside her) stay in focus (blur them with Blur by Text)
 - Depth and mattes do not follow time-stretched or time-remapped layers
