@@ -4,7 +4,7 @@
 build_explainer.py - DoF Anime の解説動画を組み立てる (ffmpeg)
 
   python build_explainer.py --work <作業フォルダ> --fonts <書体のフォルダ> --bgm <曲> --src <元の動画> --final <完成版の動画>
-                            --depth-lo <深度 518 の連番のフォルダ> --depth-hi <深度 1036 の連番のフォルダ> --subject <キャラのマスクの連番のフォルダ>
+                            --depth-lo <深度 518 の連番のフォルダ> --depth-hi <深度 1036 の連番のフォルダ> --subject <人物のマスクの連番のフォルダ>
 
   → <作業フォルダ>/out/dof_explainer.mp4 (1920x1080, 30fps)
 
@@ -142,7 +142,7 @@ def depth_pair(n, ss, dur, crop):
     scale = min((W - 60) / 2 / cw, avail_h / ch)
     tw, th = int(cw * scale) // 2 * 2, int(ch * scale) // 2 * 2
     ins = seq_input(a.depth_lo) + seq_input(a.depth_hi)
-    labels = ["推定の大きさ 518（前の既定）", "1036（今の設定・fp16）"]
+    labels = ["深度 518（前）", "深度 1036（今）"]
     fl = []
     for i in range(2):
         fl.append(f"[{i}:v]trim=start={ss}:duration={dur},setpts=PTS-STARTPTS,format=gray,scale=1376:768:flags=bicubic,crop={cw}:{ch}:{x}:{y},"
@@ -151,18 +151,18 @@ def depth_pair(n, ss, dur, crop):
     fl.append(f"[v0p][v1]hstack=inputs=2[hs]")
     top = (H - 190 - th) // 2
     fl.append(f"[hs]pad={W}:{H}:(ow-iw)/2:{top}:color={BG},"
-              f"{caption('dp', '深度の推定を細かくする（518 → 1036）', 'モデルを fp16 にして VRAM を約半分に。髪の束や草の葉の先まで深度に入る（Small のままなので商用可）')},{fades(dur)}[out]")
+              f"{caption('dp', '細い髪や草は深度に入りにくい → 推定を細かく（518 → 1036）', 'モデルを fp16 にして VRAM を約半分に。毛先や葉の先まで入る')},{fades(dur)}[out]")
     fl.append(f"anullsrc=r=48000:cl=stereo,atrim=0:{dur}[a]")
     run(ins + ["-filter_complex", ";".join(fl), "-map", "[out]", "-map", "[a]", "-t", f"{dur}"] + ENC + [str(SEG / f"{n:02d}.mp4")])
 
 
 def mask_overlay(n, ss, dur):
-    """キャラのマスク (赤 = 手前の子、緑 = 奥の子) を元の動画に半透明で重ねる"""
+    """人物のマスク (赤 = 手前の女性、緑 = 奥の女性) を元の動画に半透明で重ねる"""
     vf = (f"[0:v]trim=start={ss}:duration={dur},setpts=PTS-STARTPTS,scale=1376:768,format=gbrp[s];"
           f"[1:v]trim=start={ss}:duration={dur},setpts=PTS-STARTPTS,scale=1376:768,format=gbrp[m];"
           f"[s][m]blend=all_mode=addition:all_opacity=0.45,format=yuv420p,{FIT},fps={FPS},"
-          f"{label('mk_lb', 'キャラのマスク（赤＝手前の子、緑＝奥の子）')},"
-          f"{caption('mk', '③ キャラのマスク（SAM 3.1）で、人物の中の深度をそろえる', '推定した深度は人物の中でも揺れる（顔と胸元で違う）。マスクの中を代表の深度にそろえ、全身を同じようにぼかす')},"
+          f"{label('mk_lb', '人物のマスク（赤＝手前の女性、緑＝奥の女性）')},"
+          f"{caption('mk', '③ 人物のマスク（SAM 3.1）で、人物の中の深度をそろえる', '顔と胸元で深度が違っても、全身が同じようにぼける')},"
           f"{fades(dur)}[v]")
     run(["-i", str(a.src)] + seq_input(a.subject, "subject.%05d.png") +
         ["-f", "lavfi", "-t", f"{dur}", "-i", "anullsrc=r=48000:cl=stereo",
@@ -186,35 +186,31 @@ def main():
 
     # 1. 元の動画 (タイトルが左下からすべり込む)
     title = (f"drawtext=fontfile='{FONT_B}':textfile='{text_file('title', 'DoF Anime')}':fontsize=96:fontcolor=white:"
-             f"box=1:boxcolor=black@0.5:boxborderw=22:y=h-300:x='{slide(0.6, 3.6)}'")
+             f"box=1:boxcolor=black@0.5:boxborderw=22:y=h-300:x='{slide(0.5, 3.6)}'")
     tsub = (f"drawtext=fontfile='{FONT_R}':textfile='{text_file('title_sub', 'AI アニメ動画に、あとからピントとぼけを足す After Effects プラグイン')}':"
-            f"fontsize=42:fontcolor=white:box=1:boxcolor=black@0.5:boxborderw=16:y=h-160:x='{slide(0.8, 3.4)}'")
-    full(0, a.src, 0, 8.0, "元の動画", "plain", "", "", extra=f"{title},{tsub}")
+            f"fontsize=42:fontcolor=white:box=1:boxcolor=black@0.5:boxborderw=16:y=h-160:x='{slide(0.7, 3.4)}'")
+    full(0, a.src, 0, 5.0, "元の動画", "plain", "", "", extra=f"{title},{tsub}")
     # 2. ぼけあり
-    full(1, R / "EX_dof_only.mp4", 0, 8.0, "DoF Anime", "dof",
-         "手前の子から奥の子へ、ピントを送る", "Focus Point にキーフレームを 2 つ打つだけ。0.8 秒かけて映画のフォーカス送りのように移る")
+    full(1, R / "EX_dof_only.mp4", 0.5, 6.0, "DoF Anime", "dof",
+         "手前の女性から奥の女性へ、ピントを送る", "Focus Point のキーフレーム 2 つだけ。0.8 秒かけてなめらかに移る")
     # 3. 作り方
-    card(2, 2.5, [("どうやってぼかしているか", 72, True, 470)])
-    full(3, R / "EX_depth.mp4", 0, 5.0, "Output：Depth", "depth",
-         "① 動画から奥行き（深度）を推定する", "Video Depth Anything（Small・商用可）。前後のコマをまとめて見るので、時間方向にちらつかない。白いほど手前", with_audio=False)
-    full(4, R / "EX_blurmap.mp4", 1.5, 5.0, "Output：Blur Map", "blurmap",
-         "② ピントとの深度の差から、ぼけの大きさを決める", "手前＝青、奥＝橙、ピント＝黒。手前と奥を分けてぼかすので、ピントの合った人物に背景がにじまない", with_audio=False)
-    mask_overlay(5, 2.0, 5.0)
-    # 4. 草や髪の毛の抜けが甘い話
-    card(6, 3.0, [("でも、細い草や髪の毛は抜けにくい", 66, True, 440),
-                  ("深度の地図は粗く、細い物は後ろの背景と混ざる", 40, False, 540)])
-    depth_pair(7, 1.0, 5.0, (0, 60, 700, 700))
-    pair(8, [(R / "EX_no_exclude.mp4", ""), (R / "EX_dof_only.mp4", "")], 0.5, 2.5, (40, 420, 520, 348),
-         ["直す前", "Exclude Layer（grass）"], "grass",
-         "マスクに入った草が途中で切れる → Exclude で草を抜く",
-         "草はキャラのマスクから抜き、草自身の手前寄りの深度にそろえる。葉は根元から先まで同じ前ぼけに")
-    pair(9, [(R / "EX_nearfill0.mp4", ""), (R / "EX_dof_only.mp4", "")], 5.0, 3.0, (20, 20, 540, 560),
+    full(2, R / "EX_depth.mp4", 0, 3.5, "Output：Depth", "depth",
+         "① 動画から奥行き（深度）を推定", "Video Depth Anything（Small・商用可）。白いほど手前", with_audio=False)
+    full(3, R / "EX_blurmap.mp4", 1.5, 3.5, "Output：Blur Map", "blurmap",
+         "② 深度の差から、ぼけの大きさを決める", "手前＝青、奥＝橙、ピント＝黒。手前と奥を分けるので背景がにじまない", with_audio=False)
+    mask_overlay(4, 2.0, 3.5)
+    # 4. 草や髪の毛の抜けが甘い所 (拡大して見せる)
+    depth_pair(5, 1.0, 4.0, (40, 150, 440, 560))
+    pair(6, [(R / "EX_no_exclude.mp4", ""), (R / "EX_dof_only.mp4", "")], 0.8, 2.6, (0, 398, 405, 279),
+         ["直す前", "Exclude（grass）"], "grass",
+         "人物のマスクに入った草が途中で切れる → Exclude で抜く",
+         "草自身の手前寄りの深度にそろえ、根元から先まで同じ前ぼけに")
+    pair(7, [(R / "EX_nearfill0.mp4", ""), (R / "EX_dof_only.mp4", "")], 5.5, 2.6, (0, 170, 320, 360),
          ["Near Fill 0", "Near Fill 16"], "nearfill",
-         "ぼけた髪の束の間がくっきり残る → Near Fill で手前のぼけを周りへ広げる",
-         "束の間のすき間（ピントの合った背景）も一緒にぼける。手前の子にピントが合っている間は何も起きない")
+         "ぼけた髪の束の縁が線で残る → Near Fill",
+         "手前のぼけを周りへ広げ、束の間のすき間もまとめてぼかす")
     # 5. 完成版
-    card(10, 2.5, [("完成版", 72, True, 430), ("Relight Anime ＋ DoF Anime ＋ FilmConvert Nitrate（ハレーション）", 40, False, 530)])
-    full(11, a.final, 0, 8.0, "Relight Anime ＋ DoF Anime ＋ Nitrate", "final", "", "")
+    full(8, a.final, 0, 8.0, "完成版：Relight Anime ＋ DoF Anime ＋ FilmConvert Nitrate", "final", "", "")
 
     segs = sorted(SEG.glob("*.mp4"))
     lst = SEG / "list.txt"
