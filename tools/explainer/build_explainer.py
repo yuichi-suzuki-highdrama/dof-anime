@@ -56,6 +56,15 @@ def caption(name, main, sub=""):
     return ",".join(f)
 
 
+def badge(name, s):
+    """足りていないところの札 (画面の上の真ん中、赤)"""
+    return (f"drawtext=fontfile='{FONT_B}':textfile='{text_file(name, s)}':fontsize=42:fontcolor=white:"
+            f"box=1:boxcolor=0xB83A2E@0.92:boxborderw=16:x=(w-tw)/2:y=22")
+
+
+BADGE_H = 84   # 札の分だけ、比べる絵を下へずらす
+
+
 def label(name, s, x=56, y=48, size=40):
     return (f"drawtext=fontfile='{FONT_B}':textfile='{text_file(name, s)}':fontsize={size}:fontcolor=white:"
             f"box=1:boxcolor=black@0.55:boxborderw=16:x={x}:y={y}")
@@ -108,10 +117,11 @@ def card(n, dur, lines):
          "-vf", vf, "-map", "0:v", "-map", "1:a", "-shortest"] + ENC + [str(SEG / f"{n:02d}.mp4")])
 
 
-def pair(n, inputs, ss, dur, crop, labels, cap_name, main, sub):
-    """2 つの素材の同じ所を切り出して左右に並べる。inputs: [(ファイル, 前処理)]。crop = (x, y, w, h) は 1376x768 での範囲"""
+def pair(n, inputs, ss, dur, crop, labels, cap_name, main, sub, bad=""):
+    """2 つの素材の同じ所を切り出して左右に並べる。inputs: [(ファイル, 前処理)]。crop = (x, y, w, h) は 1376x768 での範囲。
+    bad を渡すと、足りていないところの札を上に出す"""
     x, y, cw, ch = crop
-    avail_h = H - 190 - 60
+    avail_h = H - 190 - 60 - (BADGE_H if bad else 0)
     scale = min((W - 60) / 2 / cw, avail_h / ch)
     tw, th = int(cw * scale) // 2 * 2, int(ch * scale) // 2 * 2
     ins, fl = [], []
@@ -125,8 +135,10 @@ def pair(n, inputs, ss, dur, crop, labels, cap_name, main, sub):
     # 間を空ける: 右の絵を gap だけずらすため、左右を別に置き直す
     fl[-2] = f"[v0]pad={tw + gap}:{th}:0:0:color={BG}[v0p]"
     fl[-1] = f"[v0p][v1]hstack=inputs=2[hs2]"
-    top = (H - 190 - th) // 2
-    fl.append(f"[hs2]pad={W}:{H}:(ow-iw)/2:{top}:color={BG},{caption(cap_name, main, sub)},{fades(dur)}[out]")
+    off = BADGE_H if bad else 0
+    top = off + (H - 190 - off - th) // 2
+    bf = f",{badge(cap_name + '_bd', bad)}" if bad else ""
+    fl.append(f"[hs2]pad={W}:{H}:(ow-iw)/2:{top}:color={BG},{caption(cap_name, main, sub)}{bf},{fades(dur)}[out]")
     fl.append(f"anullsrc=r=48000:cl=stereo,atrim=0:{dur}[a]")
     run(ins + ["-filter_complex", ";".join(fl), "-map", "[out]", "-map", "[a]", "-t", f"{dur}"] + ENC + [str(SEG / f"{n:02d}.mp4")])
 
@@ -135,10 +147,10 @@ def seq_input(folder, name="depth.%05d.png"):
     return ["-framerate", "24", "-i", str(Path(folder) / name)]
 
 
-def depth_pair(n, ss, dur, crop):
-    """深度 518 と 1036 を左右に並べる (同じ所を切り出す)"""
+def depth_pair(n, ss, dur, crop, bad, main, sub):
+    """深度 518 と 1036 を左右に並べる (同じ所を切り出す)。足りていないところの札を上に出す"""
     x, y, cw, ch = crop
-    avail_h = H - 190 - 60
+    avail_h = H - 190 - 60 - BADGE_H
     scale = min((W - 60) / 2 / cw, avail_h / ch)
     tw, th = int(cw * scale) // 2 * 2, int(ch * scale) // 2 * 2
     ins = seq_input(a.depth_lo) + seq_input(a.depth_hi)
@@ -149,9 +161,9 @@ def depth_pair(n, ss, dur, crop):
                   f"scale={tw}:{th}:flags=lanczos,format=yuv420p,fps={FPS},{label(f'dp_l{i}', labels[i], x=14, y=14, size=34)}[v{i}]")
     fl.append(f"[v0]pad={tw + 20}:{th}:0:0:color={BG}[v0p]")
     fl.append(f"[v0p][v1]hstack=inputs=2[hs]")
-    top = (H - 190 - th) // 2
+    top = BADGE_H + (H - 190 - BADGE_H - th) // 2
     fl.append(f"[hs]pad={W}:{H}:(ow-iw)/2:{top}:color={BG},"
-              f"{caption('dp', '細い髪や草は深度に入りにくい → 推定を細かく（518 → 1036）', 'モデルを fp16 にして VRAM を約半分に。毛先や葉の先まで入る')},{fades(dur)}[out]")
+              f"{caption('dp', main, sub)},{badge('dp_bd', bad)},{fades(dur)}[out]")
     fl.append(f"anullsrc=r=48000:cl=stereo,atrim=0:{dur}[a]")
     run(ins + ["-filter_complex", ";".join(fl), "-map", "[out]", "-map", "[a]", "-t", f"{dur}"] + ENC + [str(SEG / f"{n:02d}.mp4")])
 
@@ -199,16 +211,18 @@ def main():
     full(3, R / "EX_blurmap.mp4", 1.5, 3.5, "Output：Blur Map", "blurmap",
          "② 深度の差から、ぼけの大きさを決める", "手前＝青、奥＝橙、ピント＝黒。手前と奥を分けるので背景がにじまない", with_audio=False)
     mask_overlay(4, 2.0, 3.5)
-    # 4. 草や髪の毛の抜けが甘い所 (拡大して見せる)
-    depth_pair(5, 1.0, 4.0, (40, 150, 440, 560))
-    pair(6, [(R / "EX_no_exclude.mp4", ""), (R / "EX_dof_only.mp4", "")], 0.8, 2.6, (0, 398, 405, 279),
-         ["直す前", "Exclude（grass）"], "grass",
-         "人物のマスクに入った草が途中で切れる → Exclude で抜く",
-         "草自身の手前寄りの深度にそろえ、根元から先まで同じ前ぼけに")
-    pair(7, [(R / "EX_nearfill0.mp4", ""), (R / "EX_dof_only.mp4", "")], 5.5, 2.6, (0, 170, 320, 360),
-         ["Near Fill 0", "Near Fill 16"], "nearfill",
-         "ぼけた髪の束の縁が線で残る → Near Fill",
-         "手前のぼけを周りへ広げ、束の間のすき間もまとめてぼかす")
+    # 4. 足りていないところ (草や髪の毛の抜けが甘い所。拡大して見せ、何が足りないか・どこまで直せるかを正直に書く)
+    depth_pair(5, 1.0, 4.0, (40, 150, 440, 560), "足りていないところ ①",
+               "細い髪や草の葉は、深度に入りにくい",
+               "推定を細かく（518 → 1036）して改善したが、細い所は今も背景と混ざることがある")
+    pair(6, [(R / "EX_no_exclude.mp4", ""), (R / "EX_dof_only.mp4", "")], 0.8, 3.0, (0, 398, 405, 279),
+         ["そのまま", "Exclude（grass）を指定"], "grass",
+         "人物のマスクに草が入ると、葉が途中で切れる",
+         "自動では直らない。Exclude で草を指定すると、根元から先まで同じ前ぼけになる", bad="足りていないところ ②")
+    pair(7, [(R / "EX_nearfill0.mp4", ""), (R / "EX_dof_only.mp4", "")], 5.5, 3.0, (0, 170, 320, 360),
+         ["Near Fill 0（既定）", "Near Fill 16"], "nearfill",
+         "ぼけた髪の束の縁が、線のまま残る",
+         "Near Fill を上げると目立たなくなる（既定は 0 なので、設定が要る）", bad="足りていないところ ③")
     # 5. 完成版
     full(8, a.final, 0, 8.0, "完成版：Relight Anime ＋ DoF Anime ＋ FilmConvert Nitrate", "final", "", "")
 
