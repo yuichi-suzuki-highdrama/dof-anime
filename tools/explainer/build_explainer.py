@@ -144,13 +144,14 @@ def pair(n, inputs, ss, dur, crop, labels, cap_name, main, sub, bad=""):
 
 
 def spots(n, src, items, dur, cap_name, main, sub, bad):
-    """1 本の素材の、別々の時刻・場所を切り出して左右に並べる (高さをそろえる)。items: [(開始の秒, (x, y, w, h), ラベル)]"""
+    """1 本の素材の、別々の時刻・場所を切り出して横に並べる (高さをそろえる)。items: [(開始の秒, (x, y, w, h), ラベル)]"""
     avail_h = H - 190 - 60 - BADGE_H
     gap = 20
     th = avail_h
     widths = [int(c[2] * th / c[3]) for _, c, _ in items]
-    if sum(widths) + gap > W - 60:
-        k = (W - 60 - gap) / sum(widths)
+    gaps = gap * (len(items) - 1)
+    if sum(widths) + gaps > W - 60:
+        k = (W - 60 - gaps) / sum(widths)
         th = int(th * k)
     th = th // 2 * 2
     ins, fl = [], []
@@ -159,8 +160,10 @@ def spots(n, src, items, dur, cap_name, main, sub, bad):
         tw = int(cw * th / ch) // 2 * 2
         fl.append(f"[{i}:v]trim=start={ss}:duration={dur},setpts=PTS-STARTPTS,scale=1376:768,crop={cw}:{ch}:{x}:{y},"
                   f"scale={tw}:{th}:flags=lanczos,fps={FPS},{label(f'{cap_name}_l{i}', lab, x=14, y=14, size=34)}[v{i}]")
-    fl.append(f"[v0]pad=iw+{gap}:ih:0:0:color={BG}[v0p]")
-    fl.append("[v0p][v1]hstack=inputs=2[hs]")
+    n_in = len(items)
+    for i in range(n_in - 1):
+        fl.append(f"[v{i}]pad=iw+{gap}:ih:0:0:color={BG}[v{i}p]")
+    fl.append("".join(f"[v{i}p]" for i in range(n_in - 1)) + f"[v{n_in - 1}]hstack=inputs={n_in}[hs]")
     top = BADGE_H + (H - 190 - BADGE_H - th) // 2
     fl.append(f"[hs]pad={W}:{H}:(ow-iw)/2:{top}:color={BG},{caption(cap_name, main, sub)},{badge(cap_name + '_bd', bad)},{fades(dur)}[out]")
     fl.append(f"anullsrc=r=48000:cl=stereo,atrim=0:{dur}[a]")
@@ -237,10 +240,13 @@ def main():
     full(4, R / "EX_blurmap.mp4", 1.5, 3.5, "Output：Blur Map", "blurmap",
          "② 深度の差から、ぼけの大きさを決める", "手前＝青、奥＝橙、ピント＝黒。手前と奥を分けるので背景がにじまない", with_audio=False)
     mask_overlay(5, 2.0, 3.5)
-    # 5. 今後の課題: いろいろ処置をしても抜けの甘い所が残る (完成版の中の 2 か所を拡大して並べる)
-    spots(6, a.final, [(5.5, (0, 170, 320, 360), "髪の毛先"), (0.8, (200, 420, 300, 300), "草の葉の先")], 3.2, "limits",
+    # 5. 今後の課題: いろいろ処置をしても抜けの甘い所が残る (完成版の中の 3 か所を拡大して並べる)
+    spots(6, a.final, [(5.5, (0, 170, 320, 360), "髪の毛先"), (0.8, (200, 420, 300, 300), "草の葉の先"),
+                       (4.5, (700, 230, 280, 250), "奥の女性の背中のリボン")], 3.5, "limits",
           "いろいろ処置をしても、抜けの甘い所が残る",
-          "完成版でも、ぼけた髪の毛先や草の葉の先が、細い線のように残る", "今後の課題")
+          "完成版でも、細い髪の毛先・草の葉の先・張り出したリボンは、背景と混ざって抜けきらない", "今後の課題")
+    # 6. 最後にもう一度、完成版をフルで
+    full(7, a.final, 0, 8.0, "完成版：Relight Anime ＋ DoF Anime ＋ FilmConvert Nitrate", "final_end", "", "")
 
     segs = sorted(SEG.glob("*.mp4"))
     lst = SEG / "list.txt"
