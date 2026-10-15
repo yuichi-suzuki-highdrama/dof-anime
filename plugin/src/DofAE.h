@@ -54,6 +54,8 @@ enum {
 	DOF_SHARP_PROMPT,         /* ボタン: 文字で Sharp Layer のマスクを作る */
 	DOF_BLUR_LAYER,           /* 手直し: このレイヤーのアルファの所は画面のいちばん奥と同じだけぼかす */
 	DOF_BLUR_PROMPT,          /* ボタン: 文字で Blur Layer のマスクを作る */
+	DOF_EXCLUDE_LAYER,        /* このレイヤーのアルファの所をキャラのマスクから抜く (草など、キャラの手前の物) */
+	DOF_EXCLUDE_PROMPT,       /* ボタン: 文字で Exclude Layer のマスクを作る */
 	DOF_TOPIC_FOCUS_END,
 
 	/* --- Blur --- */
@@ -64,6 +66,7 @@ enum {
 	DOF_EDGE_EXPAND,
 	DOF_EDGE_BIAS,            /* ぼけている側をくっきりした側へ食い込ませる幅 */
 	DOF_EDGE_SOFTEN,          /* くっきりした物の縁から内側へ、ぼけを少しずつ弱めていく幅 */
+	DOF_NEAR_FILL,            /* 手前のぼけを周りへ広げる幅 */
 	DOF_TOPIC_BLUR_END,
 
 	/* --- Bokeh --- */
@@ -162,7 +165,12 @@ enum {
 	ID_TOPIC_PASSES_END,
 
 	ID_OUTPUT_MODE = 110,
-	ID_MIX
+	ID_MIX,
+
+	/* あとから足したもの (上の区切りに空きが無いので、ここにまとめる) */
+	ID_EXCLUDE_LAYER = 130,
+	ID_EXCLUDE_PROMPT,
+	ID_NEAR_FILL
 };
 
 /* PreRender → SmartRender に渡す情報 */
@@ -173,8 +181,8 @@ struct PreRenderData {
 	bool     depthChecked;
 	PF_LRect subjectRect; /* キャラのマスクのレイヤーも全体を取り出す */
 	bool     subjectChecked;
-	PF_LRect fixRect[2];  /* 手直しのレイヤー (Sharp Layer, Blur Layer) も全体を取り出す */
-	bool     fixChecked[2];
+	PF_LRect fixRect[3];  /* 手直しのレイヤー (Sharp Layer, Blur Layer, Exclude Layer) も全体を取り出す */
+	bool     fixChecked[3];
 	/* 深度を時間方向にならすための前後のフレーム */
 	int      nbCount;
 	int      nbOff[4];

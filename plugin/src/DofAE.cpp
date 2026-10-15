@@ -222,6 +222,9 @@ static float RenderFrameCPU(DofContext &c, const DfImage &src, const DfAuxMap &d
 					dfSubjectSmooth3(subjectMap, c.p.subjectChannel, (float)x, (float)y, DF_SUBJECT_SMOOTH_1080 * c.layerH / 1080.f, o);
 					const size_t n = (size_t)y * W + x;
 					dfSubjectWeights(&c, o, subject[n], subjectTgt[n]);
+					/* Exclude Layer の所はキャラのマスクから抜く (深度をそろえず、元の深度のままぼかす) */
+					if (fixMaps && fixMaps[2].img.data)
+						subject[n] *= 1.f - dfFixAt(fixMaps[2], (float)x * fixMaps[2].sx + fixMaps[2].ox, (float)y * fixMaps[2].sy + fixMaps[2].oy);
 				}
 			});
 			/* Subject Inset: マスクを内側へ縮めてなだらかにする (縁は深度だけで決まる)。tmp を作業に使う */
@@ -304,6 +307,13 @@ static float RenderFrameCPU(DofContext &c, const DfImage &src, const DfAuxMap &d
 			parallelRows(H, [&](A_long y) { for (int x = 0; x < W; ++x) tmp[(size_t)y * W + x] = dfSoften1D(coc.data(), true, W, H, c.soften, true, x, (int)y); });
 			parallelRows(H, [&](A_long y) {
 				for (int x = 0; x < W; ++x) { const size_t n = (size_t)y * W + x; coc[n] = dfSoftenApply(coc[n], dfSoften1D(tmp.data(), false, W, H, c.soften, false, x, (int)y)); }
+			});
+		}
+		if (c.nearFill >= 0.5f) {
+			const int r = dfRound(c.nearFill);
+			parallelRows(H, [&](A_long y) { for (int x = 0; x < W; ++x) tmp[(size_t)y * W + x] = dfNearMin1D(coc.data(), true, W, H, r, true, x, (int)y); });
+			parallelRows(H, [&](A_long y) {
+				for (int x = 0; x < W; ++x) { const size_t n = (size_t)y * W + x; coc[n] = dfNearFillApply(coc[n], dfNearMin1D(tmp.data(), false, W, H, r, false, x, (int)y)); }
 			});
 		}
 		c.depth = depth.data();
@@ -503,6 +513,13 @@ static PF_Err ParamsSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef 
 	AEFX_CLR_STRUCT(def);
 	PF_ADD_BUTTON("Blur by Text", "Text...", 0, PF_ParamFlag_SUPERVISE, ID_BLUR_PROMPT);
 
+	/* Exclude Layer: アルファの所をキャラのマスクから抜く。草など、キャラの手前にある物がマスクに入ると、
+	   その所だけキャラの深度にそろえられて途中で切れる。抜いた所は元の深度のままぼける */
+	AEFX_CLR_STRUCT(def);
+	PF_ADD_LAYER("Exclude Layer", PF_LayerDefault_NONE, ID_EXCLUDE_LAYER);
+	AEFX_CLR_STRUCT(def);
+	PF_ADD_BUTTON("Exclude by Text", "Text...", 0, PF_ParamFlag_SUPERVISE, ID_EXCLUDE_PROMPT);
+
 	AEFX_CLR_STRUCT(def);
 	PF_END_TOPIC(ID_TOPIC_FOCUS_END);
 
@@ -539,6 +556,12 @@ static PF_Err ParamsSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef 
 	AEFX_CLR_STRUCT(def);
 	PF_ADD_FLOAT_SLIDERX("Edge Soften", 0.f, 16.f, 0.f, 8.f, DEF_EDGE_SOFTEN,
 		PF_Precision_TENTHS, PF_ValueDisplayFlag_NONE, 0, ID_EDGE_SOFTEN);
+
+	/* Near Fill: 手前のぼけを周りへこの幅だけ広げる。手前の髪の束がぼけるとき、束の間のすき間も一緒にぼける (束の縁が線に見えない)。
+	   手前の物にピントが合っている間は何も起きない */
+	AEFX_CLR_STRUCT(def);
+	PF_ADD_FLOAT_SLIDERX("Near Fill", 0.f, 32.f, 0.f, 16.f, 0.f,
+		PF_Precision_TENTHS, PF_ValueDisplayFlag_NONE, 0, ID_NEAR_FILL);
 
 	AEFX_CLR_STRUCT(def);
 	PF_END_TOPIC(ID_TOPIC_BLUR_END);
@@ -834,6 +857,7 @@ static PF_Err ReadDofParams(PF_InData *in_data, DofParams &p)
 	p.edgeExpand  = dfMax(0.f, r.fs(DOF_EDGE_EXPAND, DEF_EDGE_EXPAND));
 	p.edgeBias    = dfMax(0.f, r.fs(DOF_EDGE_BIAS, DEF_EDGE_BIAS));
 	p.edgeSoften  = dfMax(0.f, r.fs(DOF_EDGE_SOFTEN, DEF_EDGE_SOFTEN));
+	p.nearFill    = dfMax(0.f, r.fs(DOF_NEAR_FILL, 0.f));
 	p.shape       = (int)r.popup(DOF_SHAPE, SHAPE_CIRCLE);
 	p.shapeRotation = r.angle(DOF_SHAPE_ROTATION, 0.f);
 	p.blades      = (int)(r.fs(DOF_BLADES, 6.f) + 0.5f);
@@ -915,8 +939,8 @@ static PF_Err PreRender(PF_InData *in_data, PF_OutData *out_data, PF_PreRenderEx
 
 	/* 深度レイヤーとキャラのマスクのレイヤーは全体を取り出す (Relight Anime と同じ。まず 1 画素だけ要求して全体の範囲を知る)。
 	   未指定でも番号は予約しておく (予約していない番号を取り出すと AE が「Unknown checkout id」を出す) */
-	for (int which = 0; which < 4; ++which) {
-		static const A_long idxOf[4] = {DOF_DEPTH_LAYER, DOF_SUBJECT_LAYER, DOF_SHARP_LAYER, DOF_BLUR_LAYER};
+	for (int which = 0; which < 5; ++which) {
+		static const A_long idxOf[5] = {DOF_DEPTH_LAYER, DOF_SUBJECT_LAYER, DOF_SHARP_LAYER, DOF_BLUR_LAYER, DOF_EXCLUDE_LAYER};
 		const A_long idx = idxOf[which];
 		PF_LRect &rect = which == 0 ? prd->depthRect : (which == 1 ? prd->subjectRect : prd->fixRect[which - 2]);
 		bool &checked = which == 0 ? prd->depthChecked : (which == 1 ? prd->subjectChecked : prd->fixChecked[which - 2]);
@@ -1013,7 +1037,7 @@ static PF_Err SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRend
 {
 	PF_Err err = PF_Err_NONE, err2 = PF_Err_NONE;
 
-	PF_EffectWorld *inputP = NULL, *outputP = NULL, *depthP = NULL, *subjectP = NULL, *fixP[2] = {NULL, NULL};
+	PF_EffectWorld *inputP = NULL, *outputP = NULL, *depthP = NULL, *subjectP = NULL, *fixP[3] = {NULL, NULL, NULL};
 	ERR(extra->cb->checkout_layer_pixels(in_data->effect_ref, DOF_INPUT, &inputP));
 	ERR(extra->cb->checkout_output(in_data->effect_ref, &outputP));
 
@@ -1025,8 +1049,8 @@ static PF_Err SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRend
 		if (!prd || !prd->subjectChecked || extra->cb->checkout_layer_pixels(in_data->effect_ref, DOF_SUBJECT_LAYER, &subjectP)) subjectP = NULL;
 		if (subjectP && !isGPU && !subjectP->data) subjectP = NULL;
 		if (subjectP && subjectP->width <= 0) subjectP = NULL;
-		for (int k = 0; k < 2; ++k) {
-			const A_long idx = k == 0 ? DOF_SHARP_LAYER : DOF_BLUR_LAYER;
+		for (int k = 0; k < 3; ++k) {
+			const A_long idx = k == 0 ? DOF_SHARP_LAYER : (k == 1 ? DOF_BLUR_LAYER : DOF_EXCLUDE_LAYER);
 			if (!prd || !prd->fixChecked[k] || extra->cb->checkout_layer_pixels(in_data->effect_ref, idx, &fixP[k])) fixP[k] = NULL;
 			if (fixP[k] && !isGPU && !fixP[k]->data) fixP[k] = NULL;
 			if (fixP[k] && fixP[k]->width <= 0) fixP[k] = NULL;
@@ -1115,7 +1139,7 @@ static PF_Err SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRend
 			DfImage nbImg[4];
 			for (int k = 0; k < nbN; ++k) nbImg[k] = ImageOf(nbW[k], code);
 			std::vector<DfRgba> buf;
-			const DfAuxMap fixMaps[2] = {fixMapOf(0, ImageOf(fixP[0], code)), fixMapOf(1, ImageOf(fixP[1], code))};
+			const DfAuxMap fixMaps[3] = {fixMapOf(0, ImageOf(fixP[0], code)), fixMapOf(1, ImageOf(fixP[1], code)), fixMapOf(2, ImageOf(fixP[2], code))};
 			focusUsed = RenderFrameCPU(ctx, ImageOf(inputP, code), depthMap, subjectMapOf(ImageOf(subjectP, code)), nbImg, nbN, buf, fixMaps);
 			WriteWorld(outputP, fmt, buf);
 		} else {
@@ -1138,9 +1162,9 @@ static PF_Err SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRend
 				f.ctx = ctx;
 				f.depthMap    = depthMapOf(ImageOf(depthMem ? depthP : NULL, DF_FMT_BGRA32F, depthMem));
 				f.subjectMap  = subjectMapOf(ImageOf(subjectMem ? subjectP : NULL, DF_FMT_BGRA32F, subjectMem));
-				for (int k = 0; k < 2; ++k) {
+				for (int k = 0; k < 3; ++k) {
 					void *fm = mem(fixP[k]);
-					(k == 0 ? f.sharpMap : f.blurMap) = fixMapOf(k, ImageOf(fm ? fixP[k] : NULL, DF_FMT_BGRA32F, fm));
+					(k == 0 ? f.sharpMap : (k == 1 ? f.blurMap : f.excludeMap)) = fixMapOf(k, ImageOf(fm ? fixP[k] : NULL, DF_FMT_BGRA32F, fm));
 				}
 				f.src         = ImageOf(inputP, DF_FMT_BGRA32F, srcMem);
 				f.dst         = dstMem;
@@ -1193,6 +1217,7 @@ static PF_Err SmartRender(PF_InData *in_data, PF_OutData *out_data, PF_SmartRend
 	if (subjectP) ERR2(extra->cb->checkin_layer_pixels(in_data->effect_ref, DOF_SUBJECT_LAYER));
 	if (fixP[0]) ERR2(extra->cb->checkin_layer_pixels(in_data->effect_ref, DOF_SHARP_LAYER));
 	if (fixP[1]) ERR2(extra->cb->checkin_layer_pixels(in_data->effect_ref, DOF_BLUR_LAYER));
+	if (fixP[2]) ERR2(extra->cb->checkin_layer_pixels(in_data->effect_ref, DOF_EXCLUDE_LAYER));
 	return err;
 }
 
@@ -1367,8 +1392,8 @@ PF_Err EffectMain(
 				Auto_Request(in_data, true, (int)params[DOF_AUTO_ENGINE]->u.pd.value);
 			} else if (uc->param_index == DOF_SUBJECT_GENERATE) {
 				Auto_RequestSubject(in_data, true);
-			} else if (uc->param_index == DOF_SHARP_PROMPT || uc->param_index == DOF_BLUR_PROMPT) {
-				Auto_PromptButton(in_data, uc->param_index == DOF_SHARP_PROMPT ? 0 : 1);
+			} else if (uc->param_index == DOF_SHARP_PROMPT || uc->param_index == DOF_BLUR_PROMPT || uc->param_index == DOF_EXCLUDE_PROMPT) {
+				Auto_PromptButton(in_data, uc->param_index == DOF_SHARP_PROMPT ? 0 : (uc->param_index == DOF_BLUR_PROMPT ? 1 : 2));
 			} else if (uc->param_index == DOF_AUTO_CLEAN) {
 				Auto_CleanCache(in_data);
 			} else if (uc->param_index == DOF_FOCUS_MODE) {

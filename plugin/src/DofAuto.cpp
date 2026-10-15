@@ -200,7 +200,7 @@ struct AutoJob {
 	double          pointX = 0.0, pointY = 0.0;   /* Focus Point (レイヤー座標 = 素材の画素) */
 	A_long          promptFrame = 0;               /* 点を見るコマ */
 	int             subjectType = 1;               /* 1: Anime Character  2: Person  3: Animal */
-	/* 文字のマスクのジョブ (promptKind >= 0。0 = Sharp Layer、1 = Blur Layer)。出力先は subjectDir */
+	/* 文字のマスクのジョブ (promptKind >= 0。0 = Sharp Layer、1 = Blur Layer、2 = Exclude Layer)。出力先は subjectDir */
 	int             promptKind = -1;
 	std::wstring    promptText;
 	bool            promptAtPoint = false;
@@ -1123,8 +1123,8 @@ static void ProcessSubjectJob(AEGP_SuiteHandler &suites, AutoJob &job, std::vect
 /* 文字のマスク (Sharp Layer / Blur Layer) の生成                         */
 /* ------------------------------------------------------------------ */
 
-static const wchar_t *PromptLayerParam(int kind) { return kind == 0 ? L"Sharp Layer" : L"Blur Layer"; }
-static const wchar_t *PromptLayerName(int kind) { return kind == 0 ? L"DoF sharp" : L"DoF blur"; }
+static const wchar_t *PromptLayerParam(int kind) { return kind == 0 ? L"Sharp Layer" : (kind == 1 ? L"Blur Layer" : L"Exclude Layer"); }
+static const wchar_t *PromptLayerName(int kind) { return kind == 0 ? L"DoF sharp" : (kind == 1 ? L"DoF blur" : L"DoF exclude"); }
 
 /* 文字のマスクのスクリプト: キャラのマスクのスクリプトと同じフォルダの prompt_mask.py */
 static std::wstring PromptScript()
@@ -1856,7 +1856,8 @@ static INT_PTR CALLBACK PromptDlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 	case WM_INITDIALOG:
 		SetWindowLongPtrW(h, DWLP_USER, lp);
 		st = (PromptDlgState *)lp;
-		SetWindowTextW(h, st->kind == 0 ? L"DoF Anime: くっきり残す物 (Sharp Layer)" : L"DoF Anime: ぼかす物 (Blur Layer)");
+		SetWindowTextW(h, st->kind == 0 ? L"DoF Anime: くっきり残す物 (Sharp Layer)" :
+		                  (st->kind == 1 ? L"DoF Anime: ぼかす物 (Blur Layer)" : L"DoF Anime: キャラのマスクから抜く物 (Exclude Layer)"));
 		SetDlgItemTextW(h, 101, st->text.c_str());
 		CheckDlgButton(h, 102, st->atPoint ? BST_CHECKED : BST_UNCHECKED);
 		SetFocus(GetDlgItem(h, 101));
@@ -1914,7 +1915,8 @@ static bool AskPrompt(int kind, std::wstring &text, bool &atPoint)
 	DlgStr(v, L"Segoe UI");
 	DlgItem(v, SS_LEFT, 7, 7, 266, 26, 0xFFFF, 0x0082,
 	        kind == 0 ? L"くっきり残したい物の名前を英語で入れてください (カンマで区切れば複数)。\n例: flower, grass"
-	                  : L"ぼかしたい物の名前を英語で入れてください (カンマで区切れば複数)。\n例: window, bed");
+	        : (kind == 1 ? L"ぼかしたい物の名前を英語で入れてください (カンマで区切れば複数)。\n例: window, bed"
+	                     : L"キャラの手前にあってマスクから抜きたい物の名前を英語で入れてください。\n例: grass, leaves"));
 	DlgItem(v, WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL, 7, 36, 266, 14, 101, 0x0081, L"");
 	DlgItem(v, BS_AUTOCHECKBOX | WS_TABSTOP, 7, 56, 266, 12, 102, 0x0080, L"Focus Point の所の物を 1 つだけ (外すと見つかった物を全部)");
 	DlgItem(v, BS_DEFPUSHBUTTON | WS_TABSTOP, 165, 77, 50, 16, IDOK, 0x0080, L"作る");
@@ -1931,9 +1933,9 @@ static bool AskPrompt(int kind, std::wstring &text, bool &atPoint)
 
 void Auto_PromptButton(PF_InData *in_data, int kind)
 {
-	static std::wstring lastText[2];
-	static bool lastAtPoint[2] = {false, false};
-	const int k = kind == 0 ? 0 : 1;
+	static std::wstring lastText[3];
+	static bool lastAtPoint[3] = {false, false, false};
+	const int k = kind < 0 ? 0 : (kind > 2 ? 2 : kind);
 	std::wstring text = lastText[k];
 	bool atPoint = lastAtPoint[k];
 	if (!AskPrompt(k, text, atPoint)) return;

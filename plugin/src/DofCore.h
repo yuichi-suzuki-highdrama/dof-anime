@@ -97,6 +97,7 @@ struct DofParams {
 	float edgeExpand;         /* 手前の物の輪郭を広げる幅 (1080p でのピクセル数。輪郭線を手前の物に含める) */
 	float edgeBias;           /* Edge Bias: ぼけている側を、くっきりした側へ食い込ませる幅 (1080p でのピクセル数) */
 	float edgeSoften;         /* Edge Soften: くっきりした物の縁から内側へ、ぼけを少しずつ弱めていく幅 (1080p でのピクセル数) */
+	float nearFill;           /* Near Fill: 手前のぼけを周りへ広げる幅 (1080p でのピクセル数)。髪の束の間のすき間も一緒にぼける */
 	int   shape;
 	float shapeRotation;      /* 度 */
 	int   blades;             /* Shape = Polygon のときの羽根の枚数 (3〜10) */
@@ -286,6 +287,7 @@ struct DofContext {
 	float step;               /* 深度の段差を締めるときに見るまわりの半径 (出力の画素) */
 	float bias;               /* Edge Bias (出力の画素) */
 	float soften;             /* Edge Soften (出力の画素) */
+	float nearFill;           /* Near Fill (出力の画素) */
 	float inset;              /* Subject Inset (出力の画素) */
 	int   maxSamples;
 	int   polySides;          /* 0 = 円 */
@@ -321,6 +323,7 @@ inline void dfSetupFrame(DofContext &c, float focusDepth)
 	c.step       = DF_STEP_1080 * s;
 	c.bias       = dfMax(0.f, c.p.edgeBias) * s;
 	c.soften     = dfMax(0.f, c.p.edgeSoften) * s;
+	c.nearFill   = dfMax(0.f, c.p.nearFill) * s;
 	c.inset      = dfMax(0.f, c.p.subjectInset) * s;
 	c.maxSamples = dfMaxSamples(c.p.quality);
 	c.polySides  = c.p.shape == SHAPE_HEXAGON ? 6 : (c.p.shape == SHAPE_OCTAGON ? 8 :
@@ -679,6 +682,26 @@ DF_HD DF_INL float dfSoften1D(const float *in, bool first, int W, int H, float s
 
 /* ならした奥のぼけ soft を、くっきりした側へ入れる (大きくする方だけ。手前のぼけ (負) はそのまま) */
 DF_HD DF_INL float dfSoftenApply(float coc, float soft) { return coc >= 0.f ? dfMax(coc, soft) : coc; }
+
+/*
+ * Near Fill: 手前のぼけ (負) を周りへ広げる。四角の窓の中でいちばん手前のぼけ (最小) を横・縦の 2 回で求め、
+ * 自分よりはっきり手前のぼけなら、それを使う。細い髪の束が手前でぼけるとき、束の間のすき間 (ピントの合った背景) も
+ * 一緒にぼけ、束の縁が線に見えない。手前の物にピントが合っている間はその物のぼけが 0 なので、何も起きない
+ */
+DF_HD DF_INL float dfNearMin1D(const float *in, bool first, int W, int H, int rad, bool horizontal, int x, int y)
+{
+	float m = 0.f;
+	for (int i = -rad; i <= rad; ++i) {
+		const int xx = horizontal ? dfClamp(x + i, 0, W - 1) : x;
+		const int yy = horizontal ? y : dfClamp(y + i, 0, H - 1);
+		const float v = in[(size_t)yy * W + xx];
+		m = dfMin(m, first ? dfMin(v, 0.f) : v);
+	}
+	return m;
+}
+
+/* 手前のぼけの方がはっきり大きいときだけ使う (奥の大きなぼけを、手前の小さなぼけで上書きしない) */
+DF_HD DF_INL float dfNearFillApply(float coc, float nearMin) { return -nearMin > fabsf(coc) + DF_BIAS_MIN_DIFF ? nearMin : coc; }
 
 /* ------------------------------------------------------------------ */
 /* 色 (リニア、premultiplied)                                            */

@@ -50,7 +50,7 @@ int main(int argc, char **argv)
 	p.inputLinear = false; p.outputMode = OUTPUT_FINAL; p.mix = 1.f;
 	p.subjectChannel = 1; p.subjectAmount = 0.f; p.subjectFlatten = 1.f;
 	std::vector<std::string> nbFiles;
-	std::string subjectFile, subjectRgbFile, fixFile[2];
+	std::string subjectFile, subjectRgbFile, fixFile[3];
 	for (int i = 6; i < argc; ++i) {
 		std::string a = argv[i];
 		size_t eq = a.find('=');
@@ -65,6 +65,8 @@ int main(int argc, char **argv)
 		else if (k == "subject") subjectFile = v;
 		else if (k == "sharp") fixFile[0] = v;   /* Sharp Layer (W x H の 1 チャンネル 0..1) */
 		else if (k == "blurm") fixFile[1] = v;   /* Blur Layer */
+		else if (k == "exclude") fixFile[2] = v; /* Exclude Layer */
+		else if (k == "nearfill") p.nearFill = f;
 		else if (k == "subjectrgb") { subjectRgbFile = v; p.subjectChannel = 3; }   /* キャラごとの RGB のマスク (W x H x 3) */
 		else if (k == "keep") p.subjectAmount = f;
 		else if (k == "flatten") p.subjectFlatten = f;
@@ -128,8 +130,8 @@ int main(int argc, char **argv)
 		}
 	}
 	/* 手直しのレイヤー: 1 チャンネル → 4 チャンネル全部に入れる (ARGB でも BGRA でも同じ) */
-	std::vector<float> fixData[2];
-	for (int k = 0; k < 2; ++k) {
+	std::vector<float> fixData[3];
+	for (int k = 0; k < 3; ++k) {
 		if (fixFile[k].empty()) continue;
 		std::vector<float> g;
 		if (!readFile(fixFile[k].c_str(), g, (size_t)W * H)) { std::fprintf(stderr, "fix read failed\n"); return 1; }
@@ -174,8 +176,8 @@ int main(int argc, char **argv)
 		for (int r = 0; r < repeat; ++r) {
 			DofContext c = ctx;
 			const auto t0 = std::chrono::steady_clock::now();
-			DfAuxMap fmaps[2];
-			for (int k = 0; k < 2; ++k) {
+			DfAuxMap fmaps[3];
+			for (int k = 0; k < 3; ++k) {
 				DfImage fi = {fixData[k].empty() ? NULL : (const unsigned char *)fixData[k].data(), W, H, W * 16, DF_FMT_ARGB32F};
 				fmaps[k] = dfMakeAuxMap(fi, (float)W, (float)H, 0.f, 0.f, (float)W, (float)H);
 			}
@@ -197,8 +199,8 @@ int main(int argc, char **argv)
 			cudaMalloc(&dSubj, sb.size() * 4);
 			cudaMemcpy(dSubj, sb.data(), sb.size() * 4, cudaMemcpyHostToDevice);
 		}
-		float *dFix[2] = {NULL, NULL};
-		for (int k = 0; k < 2; ++k) {
+		float *dFix[3] = {NULL, NULL, NULL};
+		for (int k = 0; k < 3; ++k) {
 			if (fixData[k].empty()) continue;
 			cudaMalloc(&dFix[k], fixData[k].size() * 4);
 			cudaMemcpy(dFix[k], fixData[k].data(), fixData[k].size() * 4, cudaMemcpyHostToDevice);
@@ -225,9 +227,9 @@ int main(int argc, char **argv)
 			f.depthMap = dfMakeAuxMap(depthImg, (float)dw, (float)dh, 0.f, 0.f, (float)W, (float)H);
 			DfImage subjImg = {dSubj ? (const unsigned char *)dSubj : NULL, W, H, W * 16, DF_FMT_BGRA32F};
 			f.subjectMap = dfMakeAuxMap(subjImg, (float)W, (float)H, 0.f, 0.f, (float)W, (float)H);
-			for (int k = 0; k < 2; ++k) {
+			for (int k = 0; k < 3; ++k) {
 				DfImage fi = {dFix[k] ? (const unsigned char *)dFix[k] : NULL, W, H, W * 16, DF_FMT_BGRA32F};
-				(k == 0 ? f.sharpMap : f.blurMap) = dfMakeAuxMap(fi, (float)W, (float)H, 0.f, 0.f, (float)W, (float)H);
+				(k == 0 ? f.sharpMap : (k == 1 ? f.blurMap : f.excludeMap)) = dfMakeAuxMap(fi, (float)W, (float)H, 0.f, 0.f, (float)W, (float)H);
 			}
 			f.src = {(const unsigned char *)dSrc, W, H, W * 16, DF_FMT_BGRA32F};
 			f.dst = dDst;

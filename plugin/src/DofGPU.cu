@@ -120,12 +120,14 @@ __global__ void kExpand(const float *in, float *out, int W, int H, int rad, bool
 	out[(size_t)y * W + x] = dfExpand1D(in, W, H, rad, horizontal, x, y);
 }
 
-__global__ void kSubject(DofContext c, DfAuxMap map, float *subject, float *tgtOut)
+__global__ void kSubject(DofContext c, DfAuxMap map, DfAuxMap ex, float *subject, float *tgtOut)
 {
 	DF_XY(c.outW, c.outH);
 	float o[3], w, tgt;
 	dfSubjectSmooth3(map, c.p.subjectChannel, (float)x, (float)y, DF_SUBJECT_SMOOTH_1080 * c.layerH / 1080.f, o);
 	dfSubjectWeights(&c, o, w, tgt);
+	/* Exclude Layer の所はキャラのマスクから抜く (深度をそろえず、元の深度のままぼかす) */
+	if (ex.img.data) w *= 1.f - dfFixAt(ex, (float)x * ex.sx + ex.ox, (float)y * ex.sy + ex.oy);
 	const size_t n = (size_t)y * c.outW + x;
 	subject[n] = w;
 	tgtOut[n] = tgt;
@@ -226,6 +228,20 @@ __global__ void kSoftenV(const float *h, float *coc, int W, int H, float sigma)
 	coc[n] = dfSoftenApply(coc[n], dfSoften1D(h, false, W, H, sigma, false, x, y));
 }
 
+/* Near Fill: 手前のぼけを周りへ広げる (横 → 縦) */
+__global__ void kNearMinH(const float *coc, float *out, int W, int H, int rad)
+{
+	DF_XY(W, H);
+	out[(size_t)y * W + x] = dfNearMin1D(coc, true, W, H, rad, true, x, y);
+}
+
+__global__ void kNearMinV(const float *h, float *coc, int W, int H, int rad)
+{
+	DF_XY(W, H);
+	const size_t n = (size_t)y * W + x;
+	coc[n] = dfNearFillApply(coc[n], dfNearMin1D(h, false, W, H, rad, false, x, y));
+}
+
 __global__ void kTileMax(DofContext c, float *tileMax)
 {
 	DF_XY(c.tilesX, c.tilesY);
@@ -315,7 +331,7 @@ int DofGPU_Render(DfGpuFrame &f, char *err, int errLen)
 		if (f.sharpMap.img.data || f.blurMap.img.data) { count(NP); count(NP); }
 		if (hasSubject) { count(NP); count(NP); count(NP); count(NP); count((size_t)dw * dh * 3); if (c.inset >= 0.5f) count(NP); }
 		count((size_t)c.tilesX * c.tilesY); count((size_t)c.tilesX * c.tilesY);
-		if (c.p.edgeBias > 0.f || c.p.edgeSoften > 0.f) count(NP);
+		if (c.p.edgeBias > 0.f || c.p.edgeSoften > 0.f || c.p.nearFill > 0.f) count(NP);
 	}
 	block = AcquireBlock(floats * sizeof(float));
 	if (!block) { if (err) snprintf(err, errLen, "work alloc failed (%zu MB)", floats * 4 / 1048576); return -2; }
@@ -372,7 +388,7 @@ int DofGPU_Render(DfGpuFrame &f, char *err, int errLen)
 		}
 		if (hasSubject) {
 			float *subject = cv.take(NP), *tgt = cv.take(NP);
-			kSubject<<<Grid2(W, H), BLOCK2>>>(c, f.subjectMap, subject, tgt);
+			kSubject<<<Grid2(W, H), BLOCK2>>>(c, f.subjectMap, f.excludeMap, subject, tgt);
 			/* Subject Inset: マスクを内側へ縮めてなだらかにする (縁は深度だけで決まる) */
 			if (c.inset >= 0.5f) {
 				float *work = cv.take(NP);
@@ -415,7 +431,7 @@ int DofGPU_Render(DfGpuFrame &f, char *err, int errLen)
 		kCoc<<<Grid2(W, H), BLOCK2>>>(c, depth, sharpB, coc);
 		DF_CHECK("coc");
 		/* 縁の仕上げ (Edge Bias → Edge Soften)。tmp と作業用の 1 枚を使う */
-		if (c.bias >= 0.5f || c.soften >= 0.5f) {
+		if (c.bias >= 0.5f || c.soften >= 0.5f || c.nearFill >= 0.5f) {
 			float *work = cv.take(NP);
 			if (c.bias >= 0.5f) {
 				kEdgeBias<<<Grid2(W, H), BLOCK2>>>(coc, work, W, H, c.bias);
@@ -424,6 +440,11 @@ int DofGPU_Render(DfGpuFrame &f, char *err, int errLen)
 			if (c.soften >= 0.5f) {
 				kSoftenH<<<Grid2(W, H), BLOCK2>>>(coc, work, W, H, c.soften);
 				kSoftenV<<<Grid2(W, H), BLOCK2>>>(work, coc, W, H, c.soften);
+			}
+			if (c.nearFill >= 0.5f) {
+				const int r = dfRound(c.nearFill);
+				kNearMinH<<<Grid2(W, H), BLOCK2>>>(coc, work, W, H, r);
+				kNearMinV<<<Grid2(W, H), BLOCK2>>>(work, coc, W, H, r);
 			}
 			DF_CHECK("edge");
 		}

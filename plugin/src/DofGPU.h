@@ -16,6 +16,7 @@ struct DfGpuFrame {
 	DfAuxMap   subjectMap;   /* キャラのマスクのワールド (img.data が NULL なら無し) */
 	DfAuxMap   sharpMap;     /* Sharp Layer (塗った所は必ずくっきり。img.data が NULL なら無し) */
 	DfAuxMap   blurMap;      /* Blur Layer (塗った所は周りの奥の深度でぼかす) */
+	DfAuxMap   excludeMap;   /* Exclude Layer (塗った所をキャラのマスクから抜く。草など、キャラの手前の物) */
 	void      *dst;          /* 出力 (GPU のワールド、BGRA float) */
 	int        dstRowbytes;
 	/* 前後のフレームの深度ワールド (深度を時間方向にならす。深度ワールドと同じ大きさ) */
