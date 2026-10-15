@@ -731,7 +731,10 @@ DF_HD DF_INL float dfNearMin1D(const float *in, bool first, int W, int H, int ra
 		const int xx = horizontal ? dfClamp(x + i, 0, W - 1) : x;
 		const int yy = horizontal ? y : dfClamp(y + i, 0, H - 1);
 		const float v = in[(size_t)yy * W + xx];
-		m = dfMin(m, first ? dfMin(v, 0.f) : v);
+		/* 離れるほど弱く広げる (横と縦の掛け算になる)。幅いっぱいに同じぼけを広げると、その外との境目が見え、
+		   細い毛のまわりが不自然に大きくぼけた */
+		const float w = 1.f - (float)(i < 0 ? -i : i) / (float)(rad + 1);
+		m = dfMin(m, (first ? dfMin(v, 0.f) : v) * w);
 	}
 	return m;
 }
