@@ -81,7 +81,7 @@ Output を Blur Map にすると、ぼけの大きさが見えます（手前 = 
 | | Edge Bias / Edge Soften | 深度と絵の輪郭のずれで出る細い帯を消す。Bias: ぼけている側をくっきりした側へ食い込ませる幅。Soften: くっきりした物の縁から内側へ、ぼけを少しずつ弱めていく幅 |
 | Bokeh | Shape / Rotation | 玉ぼけの形（円・六角形・八角形・Polygon）と向き |
 | | Blades / Roundness | Shape = Polygon の羽根の枚数（3〜10）と、多角形と円の中間 |
-| | Aspect / Cat Eye / Bubble / Fringe | 玉の縦横比（アナモルフィック風）、画面の端ほど玉が欠ける口径食、玉の縁の明るさ、玉の縁の色ずれ |
+| | Aspect / Cat Eye / Bubble / Fringe | 玉の縦横比（アナモルフィック風）、画面の端ほど玉が欠ける口径食、玉の明るさの分け方（正: 縁を明るく。負: 中心を明るく縁をやわらかく。細い髪の束をぼかすときは負がきれい）、玉の縁の色ずれ |
 | | Highlights / Highlight Threshold | 明るい所を玉ぼけにする強さと、し始める明るさ |
 | | Quality | 点の数（Draft 48 / Normal 96 / High 192） |
 | Passes | Depth Layer など | 深度レイヤー、白黒の向き、時間方向のならし、線画に合わせる、GPU を使うか |

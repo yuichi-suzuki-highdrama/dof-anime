@@ -554,7 +554,7 @@ static PF_Err ParamsSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef 
 	PF_ADD_ANGLE("Rotation", 0, ID_SHAPE_ROTATION);
 
 	/* レンズらしさ。Blades: Shape = Polygon の羽根の枚数。Roundness: 多角形と円の中間。Aspect: 玉の縦横比 (横 / 縦)。
-	   Cat Eye: 画面の端ほど玉が欠ける口径食。Bubble: 玉の縁を明るく (シャボン玉ボケ)。Fringe: 玉の縁の色ずれ */
+	   Cat Eye: 画面の端ほど玉が欠ける口径食。Bubble: 正で玉の縁を明るく (シャボン玉ボケ)、負で中心を明るく縁をやわらかく (とろけるぼけ)。Fringe: 玉の縁の色ずれ */
 	AEFX_CLR_STRUCT(def);
 	PF_ADD_FLOAT_SLIDERX("Blades", 3.f, 10.f, 3.f, 10.f, 6.f, PF_Precision_INTEGER, PF_ValueDisplayFlag_NONE, 0, ID_BLADES);
 	AEFX_CLR_STRUCT(def);
@@ -564,7 +564,7 @@ static PF_Err ParamsSetup(PF_InData *in_data, PF_OutData *out_data, PF_ParamDef 
 	AEFX_CLR_STRUCT(def);
 	PF_ADD_FLOAT_SLIDERX("Cat Eye", 0.f, 100.f, 0.f, 100.f, 0.f, PF_Precision_INTEGER, PF_ValueDisplayFlag_PERCENT, 0, ID_CAT_EYE);
 	AEFX_CLR_STRUCT(def);
-	PF_ADD_FLOAT_SLIDERX("Bubble", 0.f, 100.f, 0.f, 100.f, 0.f, PF_Precision_INTEGER, PF_ValueDisplayFlag_PERCENT, 0, ID_BUBBLE);
+	PF_ADD_FLOAT_SLIDERX("Bubble", -100.f, 100.f, -100.f, 100.f, 0.f, PF_Precision_INTEGER, PF_ValueDisplayFlag_PERCENT, 0, ID_BUBBLE);
 	AEFX_CLR_STRUCT(def);
 	PF_ADD_FLOAT_SLIDERX("Fringe", 0.f, 100.f, 0.f, 100.f, 0.f, PF_Precision_INTEGER, PF_ValueDisplayFlag_PERCENT, 0, ID_FRINGE);
 
@@ -840,7 +840,7 @@ static PF_Err ReadDofParams(PF_InData *in_data, DofParams &p)
 	p.roundness   = dfSat(r.fs(DOF_ROUNDNESS, 0.f) / 100.f);
 	p.aspect      = r.fs(DOF_ASPECT, 1.f);
 	p.catEye      = dfSat(r.fs(DOF_CAT_EYE, 0.f) / 100.f);
-	p.bubble      = dfSat(r.fs(DOF_BUBBLE, 0.f) / 100.f);
+	p.bubble      = dfClamp(r.fs(DOF_BUBBLE, 0.f) / 100.f, -1.f, 1.f);
 	p.fringe      = dfSat(r.fs(DOF_FRINGE, 0.f) / 100.f);
 	p.highlights  = dfMax(0.f, r.fs(DOF_HIGHLIGHTS, DEF_HIGHLIGHTS));
 	p.highlightThreshold = dfSat(r.fs(DOF_HIGHLIGHT_THRESHOLD, DEF_HIGHLIGHT_THR));

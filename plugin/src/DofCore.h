@@ -103,7 +103,7 @@ struct DofParams {
 	float roundness;          /* 0..1: 多角形 → 円 */
 	float aspect;             /* 玉ボケの縦横比 (横 / 縦。1 = 丸) */
 	float catEye;             /* 0..1: 口径食 */
-	float bubble;             /* 0..1: 玉ボケの縁の明るさ */
+	float bubble;             /* -1..1: 正で玉ボケの縁を明るく (シャボン玉ボケ)、負で中心を明るく縁をやわらかく (とろけるぼけ) */
 	float fringe;             /* 0..1: 玉ボケの縁の色ずれ */
 	float highlights;         /* 明るい所を玉ぼけにする強さ */
 	float highlightThreshold; /* 玉ぼけにし始める明るさ (0..1) */
@@ -327,7 +327,7 @@ inline void dfSetupFrame(DofContext &c, float focusDepth)
 	               (c.p.shape == SHAPE_POLYGON ? dfClamp(c.p.blades, 3, 10) : 0));
 	c.roundness  = dfSat(c.p.roundness);
 	c.catEye     = dfSat(c.p.catEye);
-	c.bubble     = dfSat(c.p.bubble);
+	c.bubble     = dfClamp(c.p.bubble, -1.f, 1.f);
 	c.fringe     = dfSat(c.p.fringe);
 	{
 		const float a = dfClamp(c.p.aspect > 0.f ? c.p.aspect : 1.f, 0.25f, 4.f);
@@ -798,7 +798,8 @@ DF_HD DF_INL float dfHighlight(const DofContext *c, float lum)
  *   Blades / Roundness: 絞りの羽根の枚数と、多角形と円の中間 (dfShapeScale)
  *   Aspect:   縦横比 (点を置く円を楕円にする。面積は変えない)
  *   Cat Eye:  口径食。画面の端ほど玉ボケが、中心から外への向きにずらした円で切られて欠ける
- *   Bubble:   玉ボケの縁を明るくする (シャボン玉ボケ。明るさの合計は変えない)
+ *   Bubble:   正で玉ボケの縁を明るく (シャボン玉ボケ)、負で中心を明るく縁へなだらかに暗く (とろけるぼけ。細い線をぼかしても縁が硬くならない)。
+ *             どちらも明るさの合計は変えない
  *   Fringe:   赤・緑・青で玉の半径を少しずつ変え、縁に色ずれを付ける
  */
 
@@ -816,10 +817,11 @@ DF_HD DF_INL bool dfLensCover(const DofContext *c, float rad, float aq, float r,
 			const float dx = -r * cs - ceX * rk, dy = -r * sn - ceY * rk;
 			cov = dfMin(cov, dfSat(rk - sqrtf(dx * dx + dy * dy) + 0.5f));
 		}
-		if (cov > 0.f && c->bubble > 0.f) {
+		if (cov > 0.f && c->bubble != 0.f) {
 			/* 縁ほど明るく: t^4 の面積の平均は 1/3 なので、それを引いて合計を変えない */
 			const float t = dfSat(r / dfMax(rk, 0.5f));
-			cov *= dfMax(0.05f, 1.f + 3.f * c->bubble * (t * t * t * t - 0.3333f));
+			if (c->bubble > 0.f) cov *= dfMax(0.05f, 1.f + 3.f * c->bubble * (t * t * t * t - 0.3333f));
+			else cov *= dfMax(0.f, 1.f - 2.f * c->bubble * (0.5f - t * t));   /* t^2 の面積の平均は 1/2。-1 で 2(1 - t^2) */
 		}
 		const float a = aq * chScale[k];
 		w3[k] = cov / dfMax(a * a, 0.25f);
@@ -917,6 +919,7 @@ DF_HD DF_INL void dfGather(const DofContext *c, int x, int y, float R, float *ou
 		const float wk = bgW[k < 3 ? k : 1];
 		back[k] = wk > 1e-8f ? bg[k] / wk : center[k];
 	}
+
 	/* キャラの上には手前のぼけを重ねない (キャラはいちばん上のセルとして扱う) */
 	const float keep = c->subject ? dfSat(c->subject[np] * c->p.subjectAmount) : 0.f;
 	const float alpha = dfSat(cover) * (1.f - keep);

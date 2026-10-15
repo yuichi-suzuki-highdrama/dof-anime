@@ -114,7 +114,7 @@ The items of After Effects' Camera Lens Blur are implemented as weights in the g
 | Roundness | Blends the polygon edge distance with a circle (1) |
 | Aspect | Stretches the sample disk into an ellipse (×√a horizontally, ÷√a vertically, same area); tile reach grows to match |
 | Cat Eye | Optical vignetting: q's aperture is intersected with a disk shifted along the direction from the frame centre to q. The shift grows toward the frame edge, so balls get clipped |
-| Bubble | Brighter rims: weights are multiplied by `1 + 3b(t⁴ − 1/3)` (t = distance from centre / radius). The area mean of t⁴ is 1/3, so total brightness is unchanged |
+| Bubble | Positive: brighter rims, weights × `1 + 3b(t⁴ − 1/3)` (t = distance from centre / radius). Negative: brighter centre fading to the rim (`1 − 2b(1/2 − t²)`, `2(1 − t²)` at −100%). The area means of t⁴ and t² are 1/3 and 1/2, so total brightness is unchanged either way. On thin blurred hair strands, positive values show doubled edges and negative values melt them together |
 | Fringe | Slightly different aperture radii for red, green and blue (+8% red, −8% blue at 100%), with per-channel weights, giving coloured rims |
 
 ## 7. Focus pulls
